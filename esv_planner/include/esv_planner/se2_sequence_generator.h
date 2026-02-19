@@ -14,7 +14,7 @@ public:
   void init(const GridMap& map, const CollisionChecker& checker,
             double discretization_step, int max_push_attempts);
 
-  // Generate SE(2) motion sequence for a given topological path
+  // Generate SE(2) motion sequence for a given topological path (Algorithm 2)
   // Returns segments with risk levels marked
   std::vector<MotionSegment> generate(const TopoPath& path,
                                        const SE2State& start,
@@ -26,11 +26,22 @@ private:
   double disc_step_ = 0.15;
   int max_push_ = 5;
 
-  // SegAdjust: push colliding segments away from obstacles
+  // Discretize path into position waypoints with tangent yaw
+  std::vector<SE2State> discretizePath(const TopoPath& path,
+                                        const SE2State& start,
+                                        const SE2State& goal);
+
+  // SafeYaw: assign collision-free yaw closest to desired
+  bool safeYaw(SE2State& state, double desired_yaw);
+
+  // SegAdjust: push colliding segment away + sub-segment split
   bool segAdjust(std::vector<SE2State>& segment);
 
-  // Assign yaw using SafeYaw
-  bool assignYaw(SE2State& state);
+  // Classify risk: check how constrained the yaw is at each point
+  RiskLevel classifyRisk(const std::vector<SE2State>& segment);
+
+  // Split states into contiguous segments by risk level
+  std::vector<MotionSegment> segmentByRisk(const std::vector<SE2State>& states);
 };
 
 }  // namespace esv_planner
