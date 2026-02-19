@@ -1,0 +1,38 @@
+# ESV Planner Parameters
+
+# Robot footprint (T-shape, flat list of x,y pairs)
+footprint: [0.25, 0.3, 0.25, -0.3, -0.25, -0.3, -0.25, -0.1, -0.6, -0.1, -0.6, 0.1, -0.25, 0.1, -0.25, 0.3]
+inscribed_radius: 0.1
+
+# Topology planner
+topology:
+  num_samples: 520
+  knn: 18
+  max_paths: 14
+
+# SE(2) sequence generator
+se2:
+  discretization_step: 0.15
+  yaw_bins: 18
+  max_push_attempts: 5
+
+# Trajectory optimizer
+optimizer:
+  max_iterations: 100
+  lambda_smooth: 1.0
+  lambda_time: 1.0
+  lambda_safety: 10.0
+  lambda_dynamics: 1.0
+  max_vel: 1.0
+  max_acc: 2.0
+
+# Default start/goal
+start_pose:
+  x: 1.0
+  y: 1.0
+  yaw: 0.0
+
+goal_pose:
+  x: 8.0
+  y: 8.0
+  yaw: 1.57

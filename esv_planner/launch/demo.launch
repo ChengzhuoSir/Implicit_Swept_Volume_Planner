@@ -1,0 +1,12 @@
+<launch>
+  <!-- Map server -->
+  <node name="map_server" pkg="map_server" type="map_server"
+        args="$(find esv_planner)/maps/office.yaml" />
+
+  <!-- ESV Planner -->
+  <include file="$(find esv_planner)/launch/planner.launch" />
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find esv_planner)/config/demo.rviz"
+        required="false" />
+</launch>

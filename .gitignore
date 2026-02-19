@@ -1,0 +1,23 @@
+# Build
+build/
+devel/
+logs/
+install/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROS
+*.pyc
+__pycache__/
+
+# Claude
+.claude/
