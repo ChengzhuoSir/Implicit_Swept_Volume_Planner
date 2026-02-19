@@ -13,8 +13,13 @@ struct OptimizerParams {
   double lambda_time = 1.0;
   double lambda_safety = 10.0;
   double lambda_dynamics = 1.0;
+  double lambda_pos_residual = 5.0;   // R² position residual weight
+  double lambda_yaw_residual = 2.0;   // R² rotation residual weight
   double max_vel = 1.0;
   double max_acc = 2.0;
+  double max_yaw_rate = 1.5;
+  double safety_margin = 0.05;        // SVSDF safety threshold (meters)
+  double step_size = 0.005;           // gradient descent step size
 };
 
 class TrajectoryOptimizer {
@@ -25,9 +30,11 @@ public:
             const OptimizerParams& params);
 
   // Optimize SE(2) sub-problem (high-risk segments) — Eq. (3)
+  // Jointly optimizes position and yaw with SVSDF collision penalty
   Trajectory optimizeSE2(const std::vector<SE2State>& waypoints, double total_time);
 
   // Optimize R² sub-problem (low-risk segments) — Eq. (4)
+  // Position-only optimization with position/rotation residual penalties
   Trajectory optimizeR2(const std::vector<SE2State>& waypoints, double total_time);
 
   // Stitch SE(2) and R² trajectory segments into a full trajectory
@@ -42,10 +49,28 @@ private:
   const SvsdfEvaluator* svsdf_ = nullptr;
   OptimizerParams params_;
 
-  // MINCO helpers
-  void initMincoFromWaypoints(const std::vector<SE2State>& wps,
-                               double total_time,
-                               std::vector<PolyPiece>& pieces);
+  // MINCO: fit quintic polynomial pieces through waypoints with C² continuity
+  void fitMincoQuintic(const std::vector<Eigen::Vector2d>& positions,
+                       const std::vector<double>& durations,
+                       const Eigen::Vector2d& v0, const Eigen::Vector2d& vf,
+                       const Eigen::Vector2d& a0, const Eigen::Vector2d& af,
+                       std::vector<PolyPiece>& pieces);
+
+  // Fit yaw quintic pieces
+  void fitYawQuintic(const std::vector<double>& yaws,
+                     const std::vector<double>& durations,
+                     double omega0, double omegaf,
+                     std::vector<YawPolyPiece>& pieces);
+
+  // Allocate time per segment based on distance
+  std::vector<double> allocateTime(const std::vector<SE2State>& wps, double total_time);
+
+  // Compute total cost for a trajectory
+  double computeCost(const Trajectory& traj, const std::vector<SE2State>& ref_wps,
+                     bool include_svsdf, bool include_residual);
+
+  // Dynamics feasibility check
+  bool checkDynamics(const Trajectory& traj);
 };
 
 }  // namespace esv_planner
