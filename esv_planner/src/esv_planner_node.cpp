@@ -99,6 +99,11 @@ private:
     pnh_.param("optimizer/lambda_dynamics", opt_params_.lambda_dynamics, 1.0);
     pnh_.param("optimizer/max_vel", opt_params_.max_vel, 1.0);
     pnh_.param("optimizer/max_acc", opt_params_.max_acc, 2.0);
+    pnh_.param("optimizer/max_yaw_rate", opt_params_.max_yaw_rate, 1.5);
+    pnh_.param("optimizer/lambda_pos_residual", opt_params_.lambda_pos_residual, 5.0);
+    pnh_.param("optimizer/lambda_yaw_residual", opt_params_.lambda_yaw_residual, 2.0);
+    pnh_.param("optimizer/safety_margin", opt_params_.safety_margin, 0.05);
+    pnh_.param("optimizer/step_size", opt_params_.step_size, 0.005);
 
     // Default start/goal
     double sx, sy, syaw, gx, gy, gyaw;
