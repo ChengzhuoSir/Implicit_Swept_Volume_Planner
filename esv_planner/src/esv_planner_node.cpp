@@ -129,7 +129,8 @@ private:
 
     // Initialize components
     collision_checker_.init(grid_map_, footprint_, yaw_bins_);
-    topology_planner_.init(grid_map_, collision_checker_, num_samples_, knn_, max_paths_);
+    topology_planner_.init(grid_map_, collision_checker_, num_samples_, knn_, max_paths_,
+                           footprint_.inscribedRadius());
     se2_generator_.init(grid_map_, collision_checker_, disc_step_, max_push_);
     svsdf_evaluator_.init(grid_map_, footprint_);
     optimizer_.init(grid_map_, svsdf_evaluator_, opt_params_);
