@@ -82,11 +82,21 @@ void TrajectoryOptimizer::fitMincoQuintic(
     double dt_sum = durations[i - 1] + durations[i];
     if (dt_sum < 1e-6) dt_sum = 1e-6;
     vels[i] = (positions[i + 1] - positions[i - 1]) / dt_sum;
-    // Clamp velocity magnitude to avoid numerical blow-up
+    // Clamp velocity magnitude
     double v_norm = vels[i].norm();
-    double max_v = 5.0;  // generous clamp
+    double max_v = 2.0;  // match max_vel param
     if (v_norm > max_v) vels[i] *= max_v / v_norm;
-    accs[i] = Eigen::Vector2d::Zero();
+  }
+
+  // Interior accelerations: estimated from velocities for continuity.
+  for (int i = 1; i < N; ++i) {
+    double dt_sum = durations[i - 1] + durations[i];
+    if (dt_sum < 1e-6) dt_sum = 1e-6;
+    accs[i] = (vels[std::min(i + 1, N)] - vels[std::max(i - 1, 0)]) / dt_sum;
+    // Clamp acceleration
+    double a_norm = accs[i].norm();
+    double max_a = 2.0;  // match max_acc param
+    if (a_norm > max_a) accs[i] *= max_a / a_norm;
   }
 
   // Solve 6x6 system per piece, per axis.
@@ -308,7 +318,7 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
 
   // Downsample optimised waypoints for MINCO fitting.
   // Keep first, last, and every N-th point to avoid overfitting.
-  double min_piece_len = 0.5;  // minimum ~0.5m per MINCO piece
+  double min_piece_len = 1.5;  // minimum ~1.5m per MINCO piece
   std::vector<Eigen::Vector2d> final_pos;
   std::vector<double> final_yaws;
   final_pos.push_back(Eigen::Vector2d(wps[0].x, wps[0].y));
@@ -332,9 +342,26 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
   }
   std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
 
+  // Estimate boundary velocities from waypoint direction (not zero!)
+  Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
+  Eigen::Vector2d vf = Eigen::Vector2d::Zero();
+  if (final_pos.size() >= 2) {
+    double dt0 = ds_durations.empty() ? 1.0 : ds_durations[0];
+    if (dt0 < 0.1) dt0 = 0.1;
+    v0 = (final_pos[1] - final_pos[0]) / dt0;
+    double v0n = v0.norm();
+    if (v0n > params_.max_vel) v0 *= params_.max_vel / v0n;
+
+    double dtf = ds_durations.empty() ? 1.0 : ds_durations.back();
+    if (dtf < 0.1) dtf = 0.1;
+    vf = (final_pos.back() - final_pos[final_pos.size() - 2]) / dtf;
+    double vfn = vf.norm();
+    if (vfn > params_.max_vel) vf *= params_.max_vel / vfn;
+  }
+
   Trajectory traj;
   fitMincoQuintic(final_pos, ds_durations,
-                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+                  v0, vf,
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
@@ -476,9 +503,26 @@ Trajectory TrajectoryOptimizer::optimizeR2(
   }
   std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
 
+  // Estimate boundary velocities from waypoint direction
+  Eigen::Vector2d v0r = Eigen::Vector2d::Zero();
+  Eigen::Vector2d vfr = Eigen::Vector2d::Zero();
+  if (final_pos.size() >= 2) {
+    double dt0 = ds_durations.empty() ? 1.0 : ds_durations[0];
+    if (dt0 < 0.1) dt0 = 0.1;
+    v0r = (final_pos[1] - final_pos[0]) / dt0;
+    double v0n = v0r.norm();
+    if (v0n > params_.max_vel) v0r *= params_.max_vel / v0n;
+
+    double dtf = ds_durations.empty() ? 1.0 : ds_durations.back();
+    if (dtf < 0.1) dtf = 0.1;
+    vfr = (final_pos.back() - final_pos[final_pos.size() - 2]) / dtf;
+    double vfn = vfr.norm();
+    if (vfn > params_.max_vel) vfr *= params_.max_vel / vfn;
+  }
+
   Trajectory traj;
   fitMincoQuintic(final_pos, ds_durations,
-                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+                  v0r, vfr,
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
@@ -486,21 +530,84 @@ Trajectory TrajectoryOptimizer::optimizeR2(
 }
 
 // ---------------------------------------------------------------------------
-// stitch: concatenate trajectory pieces from optimised segments
+// stitch: collect all optimised waypoints and do ONE global MINCO fit
 // ---------------------------------------------------------------------------
 Trajectory TrajectoryOptimizer::stitch(
     const std::vector<MotionSegment>& segments,
     const std::vector<Trajectory>& optimized) {
 
-  Trajectory result;
+  // Instead of concatenating per-segment pieces (which have v0=vf=0 at
+  // boundaries), we extract the waypoints from each segment's optimised
+  // trajectory by sampling, then do a single global MINCO fit.
+
   size_t count = std::min(segments.size(), optimized.size());
+  if (count == 0) return Trajectory();
+
+  // Collect all waypoints from optimised segments
+  std::vector<Eigen::Vector2d> all_pos;
+  std::vector<double> all_yaws;
+
   for (size_t i = 0; i < count; ++i) {
-    const Trajectory& t = optimized[i];
-    result.pos_pieces.insert(result.pos_pieces.end(),
-                             t.pos_pieces.begin(), t.pos_pieces.end());
-    result.yaw_pieces.insert(result.yaw_pieces.end(),
-                             t.yaw_pieces.begin(), t.yaw_pieces.end());
+    const auto& seg_wps = segments[i].waypoints;
+    // Use the segment's original (gradient-optimised) waypoints
+    for (size_t j = 0; j < seg_wps.size(); ++j) {
+      // Skip first point of subsequent segments (shared with previous)
+      if (i > 0 && j == 0) continue;
+      all_pos.push_back(Eigen::Vector2d(seg_wps[j].x, seg_wps[j].y));
+      all_yaws.push_back(seg_wps[j].yaw);
+    }
   }
+
+  if (all_pos.size() < 2) return Trajectory();
+
+  // Downsample to ~1.5m spacing
+  double min_piece_len = 1.5;
+  std::vector<Eigen::Vector2d> ds_pos;
+  std::vector<double> ds_yaws;
+  ds_pos.push_back(all_pos[0]);
+  ds_yaws.push_back(all_yaws[0]);
+
+  double accum = 0.0;
+  for (size_t i = 1; i < all_pos.size(); ++i) {
+    accum += (all_pos[i] - all_pos[i - 1]).norm();
+    if (accum >= min_piece_len || i == all_pos.size() - 1) {
+      ds_pos.push_back(all_pos[i]);
+      ds_yaws.push_back(all_yaws[i]);
+      accum = 0.0;
+    }
+  }
+
+  // Allocate time
+  double total_time = 0.0;
+  for (const auto& t : optimized) total_time += t.totalDuration();
+  std::vector<SE2State> ds_wps(ds_pos.size());
+  for (size_t i = 0; i < ds_pos.size(); ++i) {
+    ds_wps[i] = SE2State(ds_pos[i].x(), ds_pos[i].y(), ds_yaws[i]);
+  }
+  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
+
+  // Estimate boundary velocities from direction
+  Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
+  Eigen::Vector2d vf = Eigen::Vector2d::Zero();
+  if (ds_pos.size() >= 2) {
+    double dt0 = ds_durations[0];
+    if (dt0 < 0.1) dt0 = 0.1;
+    v0 = (ds_pos[1] - ds_pos[0]) / dt0;
+    double v0n = v0.norm();
+    if (v0n > params_.max_vel) v0 *= params_.max_vel / v0n;
+
+    double dtf = ds_durations.back();
+    if (dtf < 0.1) dtf = 0.1;
+    vf = (ds_pos.back() - ds_pos[ds_pos.size() - 2]) / dtf;
+    double vfn = vf.norm();
+    if (vfn > params_.max_vel) vf *= params_.max_vel / vfn;
+  }
+
+  Trajectory result;
+  fitMincoQuintic(ds_pos, ds_durations, v0, vf,
+                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+                  result.pos_pieces);
+  fitYawQuintic(ds_yaws, ds_durations, 0.0, 0.0, result.yaw_pieces);
   return result;
 }
 

@@ -142,6 +142,30 @@ struct Trajectory {
     }
     return SE2State();
   }
+
+  // Sample velocity at global time t
+  Eigen::Vector2d sampleVelocity(double t) const {
+    double acc = 0.0;
+    for (size_t i = 0; i < pos_pieces.size(); ++i) {
+      if (t <= acc + pos_pieces[i].duration || i + 1 == pos_pieces.size()) {
+        return pos_pieces[i].velocity(t - acc);
+      }
+      acc += pos_pieces[i].duration;
+    }
+    return Eigen::Vector2d::Zero();
+  }
+
+  // Sample acceleration at global time t
+  Eigen::Vector2d sampleAcceleration(double t) const {
+    double acc = 0.0;
+    for (size_t i = 0; i < pos_pieces.size(); ++i) {
+      if (t <= acc + pos_pieces[i].duration || i + 1 == pos_pieces.size()) {
+        return pos_pieces[i].acceleration(t - acc);
+      }
+      acc += pos_pieces[i].duration;
+    }
+    return Eigen::Vector2d::Zero();
+  }
 };
 
 // Candidate path from topology planner (sequence of 2D waypoints)

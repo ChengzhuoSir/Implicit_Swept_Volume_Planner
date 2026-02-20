@@ -365,12 +365,21 @@ int main(int argc, char** argv)
 
   // Evaluate minimum SVSDF along the best trajectory
   double min_svsdf = std::numeric_limits<double>::max();
+  double max_vel = 0.0, max_acc = 0.0;
   {
     double dt_sample = 0.05;
     for (double t = 0.0; t <= best_duration; t += dt_sample) {
       SE2State st = best.sample(t);
       double sv = svsdf.evaluate(st);
       if (sv < min_svsdf) min_svsdf = sv;
+
+      // Dynamics check: velocity and acceleration from polynomial
+      Eigen::Vector2d vel = best.sampleVelocity(t);
+      Eigen::Vector2d acc = best.sampleAcceleration(t);
+      double v = vel.norm();
+      double a = acc.norm();
+      if (v > max_vel) max_vel = v;
+      if (a > max_acc) max_acc = a;
     }
   }
 
@@ -390,6 +399,8 @@ int main(int argc, char** argv)
   std::cout << "  Best traj duration:  " << best_duration << " s\n";
   std::cout << "  Best traj pieces:    " << best_pieces << "\n";
   std::cout << "  Min SVSDF:           " << min_svsdf << "\n";
+  std::cout << "  Max velocity:        " << max_vel << " m/s\n";
+  std::cout << "  Max acceleration:    " << max_acc << " m/s^2\n";
   std::cout << "  Topology time:       " << dt_topo_ms << " ms\n";
   std::cout << "  SE2+Optim time:      " << dt_opt_ms << " ms\n";
   std::cout << "  Total time:          " << dt_total_ms << " ms\n";
