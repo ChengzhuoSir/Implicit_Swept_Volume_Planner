@@ -1,6 +1,6 @@
 {
   "project": "esv_planner",
-  "current_iteration": 5,
+  "current_iteration": 8,
   "features": [
     {"id": "F0.1", "name": "初始化 git 仓库 + .gitignore", "status": "done", "notes": ""},
     {"id": "F0.2", "name": "创建 init.sh 环境初始化脚本", "status": "done", "notes": ""},
@@ -27,9 +27,12 @@
     {"id": "F5.2", "name": "发布轨迹 + debug markers", "status": "done", "notes": ""},
     {"id": "F5.3", "name": "Launch 文件 + 参数配置", "status": "done", "notes": ""},
     {"id": "F5.4", "name": "测试地图 + 预设起终点场景", "status": "done", "notes": ""},
-    {"id": "F5.5", "name": "端到端测试 + git commit", "status": "done", "notes": ""}
+    {"id": "F5.5", "name": "端到端测试 + git commit", "status": "done", "notes": ""},
+    {"id": "F6", "name": "Paper algorithm alignment: Halton PRM, Yen's K-shortest, SVSDF dense, MINCO quintic", "status": "done", "notes": ""},
+    {"id": "F7", "name": "Enhanced RViz visualization: footprint, segments, waypoints, start/goal", "status": "done", "notes": ""},
+    {"id": "F8", "name": "Offline test node + numerical stability fixes", "status": "done", "notes": "NaN fixed, test PASS"}
   ],
-  "last_session_summary": "All 6 iterations complete. Full pipeline compiles clean with C++14. Ready for ROS testing.",
+  "last_session_summary": "All 8 iterations complete. Paper-aligned algorithms, enhanced visualization, offline test passing. Trajectory: 11.05s, 76 pieces, 1.57s compute.",
   "known_issues": [],
   "architecture_decisions": [
     "C++14 standard",
@@ -38,6 +41,9 @@
     "MINCO 5th-order piecewise polynomial trajectory representation",
     "Dijkstra PRM for topology",
     "SVSDF collision checking",
-    "Gradient descent optimization for SE2 and R2 sub-problems"
+    "Gradient descent optimization for SE2 and R2 sub-problems",
+    "Halton quasi-random PRM sampling",
+    "Yen's K-shortest paths for topology diversity",
+    "Dimensionless smoothness gradient for numerical stability"
   ]
 }
