@@ -207,125 +207,38 @@ static std::vector<int> reconstructIndices(const std::vector<int>& prev, int dst
 }
 
 // ---------------------------------------------------------------------------
-// searchPaths  --  Yen's K-shortest paths + topological filtering
+// searchPaths  --  Dijkstra + progressive node penalty for homotopy diversity
 // ---------------------------------------------------------------------------
 std::vector<TopoPath> TopologyPlanner::searchPaths() {
   std::vector<TopoPath> result;
   if (nodes_.size() < 2) return result;
 
   int n = static_cast<int>(nodes_.size());
-  int src = 0, dst = 1;
 
-  // --- Yen's K-shortest paths algorithm ---
-  // Step 1: find the 1st shortest path with plain Dijkstra
-  std::set<std::pair<int,int>> no_edges;
-  std::unordered_set<int> no_nodes;
-  auto first = dijkstraFull(src, dst, n, adjacency_, no_edges, no_nodes);
-  std::vector<int> first_idx = reconstructIndices(first.second, dst);
-  if (first_idx.empty()) return result;
+  // Progressive penalty: each found path penalizes its nodes
+  std::vector<double> node_penalty(n, 0.0);
+  double penalty_step = 5.0;  // strong penalty to force different regions
 
-  // A[0] = shortest path
-  struct CandidatePath {
-    double cost;
-    std::vector<int> indices;
-    bool operator>(const CandidatePath& o) const { return cost > o.cost; }
-  };
+  for (int attempt = 0; attempt < max_paths_ * 6 &&
+       static_cast<int>(result.size()) < max_paths_; ++attempt) {
 
-  std::vector<std::vector<int>> A;  // accepted index-paths
-  A.push_back(first_idx);
+    TopoPath path = dijkstra(0, 1, node_penalty);
+    if (path.points.empty()) break;
 
-  // B = min-heap of candidate paths
-  std::priority_queue<CandidatePath, std::vector<CandidatePath>,
-                      std::greater<CandidatePath>> B;
+    if (isTopologicallyDistinct(path, result)) {
+      result.push_back(path);
+    }
 
-  int K = max_paths_ * 4;  // search more candidates, filter by topology later
-
-  for (int k = 1; k < K; ++k) {
-    const auto& prev_path = A.back();
-    int prev_len = static_cast<int>(prev_path.size());
-
-    // For each spur node in the previous shortest path
-    for (int i = 0; i < prev_len - 1; ++i) {
-      int spur_node = prev_path[i];
-
-      // Root path = prev_path[0..i]
-      std::vector<int> root_path(prev_path.begin(), prev_path.begin() + i + 1);
-
-      // Block edges that share the same root path prefix in all accepted paths
-      std::set<std::pair<int,int>> blocked_edges;
-      for (const auto& ap : A) {
-        if (static_cast<int>(ap.size()) > i) {
-          bool same_root = true;
-          for (int j = 0; j <= i; ++j) {
-            if (ap[j] != root_path[j]) { same_root = false; break; }
-          }
-          if (same_root && i + 1 < static_cast<int>(ap.size())) {
-            blocked_edges.insert({ap[i], ap[i + 1]});
-          }
+    // Penalize all nodes along this path
+    for (const auto& pt : path.points) {
+      for (int i = 2; i < n; ++i) {  // skip start(0) and goal(1)
+        if ((nodes_[i] - pt).norm() < map_->resolution() * 3.0) {
+          node_penalty[i] += penalty_step;
         }
       }
-
-      // Block root path nodes (except spur node) to avoid loops
-      std::unordered_set<int> blocked_nodes;
-      for (int j = 0; j < i; ++j) {
-        blocked_nodes.insert(root_path[j]);
-      }
-
-      auto spur_result = dijkstraFull(spur_node, dst, n, adjacency_,
-                                       blocked_edges, blocked_nodes);
-      if (spur_result.first >= kInf) continue;
-
-      std::vector<int> spur_path = reconstructIndices(spur_result.second, dst);
-      if (spur_path.empty()) continue;
-
-      // Total path = root_path + spur_path (skip duplicate spur node)
-      std::vector<int> total_path = root_path;
-      for (size_t s = 1; s < spur_path.size(); ++s) {
-        total_path.push_back(spur_path[s]);
-      }
-
-      // Compute total cost
-      double total_cost = 0.0;
-      for (size_t s = 1; s < total_path.size(); ++s) {
-        total_cost += (nodes_[total_path[s]] - nodes_[total_path[s - 1]]).norm();
-      }
-
-      B.push({total_cost, total_path});
     }
-
-    if (B.empty()) break;
-
-    // Pop the best candidate that is not a duplicate of an accepted path
-    bool found = false;
-    while (!B.empty()) {
-      auto best = B.top();
-      B.pop();
-
-      bool duplicate = false;
-      for (const auto& ap : A) {
-        if (ap == best.indices) { duplicate = true; break; }
-      }
-      if (!duplicate) {
-        A.push_back(best.indices);
-        found = true;
-        break;
-      }
-    }
-    if (!found) break;
-  }
-
-  // Convert index-paths to TopoPath and filter by topological distinctness
-  for (const auto& idx_path : A) {
-    TopoPath tp;
-    for (int idx : idx_path) {
-      tp.points.push_back(nodes_[idx]);
-    }
-    tp.computeLength();
-
-    if (isTopologicallyDistinct(tp, result)) {
-      result.push_back(tp);
-      if (static_cast<int>(result.size()) >= max_paths_) break;
-    }
+    // Increase penalty each round
+    penalty_step *= 1.3;
   }
 
   std::sort(result.begin(), result.end(),

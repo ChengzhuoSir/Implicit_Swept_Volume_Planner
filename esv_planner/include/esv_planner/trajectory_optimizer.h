@@ -11,7 +11,7 @@ struct OptimizerParams {
   int max_iterations = 100;
   double lambda_smooth = 1.0;
   double lambda_time = 1.0;
-  double lambda_safety = 10.0;
+  double lambda_safety = 50.0;
   double lambda_dynamics = 1.0;
   double lambda_pos_residual = 5.0;   // R² position residual weight
   double lambda_yaw_residual = 2.0;   // R² rotation residual weight

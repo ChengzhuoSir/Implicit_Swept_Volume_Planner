@@ -463,6 +463,13 @@ Trajectory TrajectoryOptimizer::selectBest(
 
   for (size_t c = 0; c < candidates.size(); ++c) {
     const Trajectory& traj = candidates[c];
+
+    // Check collision along the MINCO curve (not just waypoints)
+    if (svsdf_) {
+      double min_sdf = svsdf_->evaluateTrajectory(traj, 0.1);
+      if (min_sdf < -0.01) continue;  // skip colliding trajectories
+    }
+
     double cost = 0.0;
 
     for (size_t i = 0; i < traj.pos_pieces.size(); ++i) {
