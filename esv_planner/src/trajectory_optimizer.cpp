@@ -363,6 +363,19 @@ Trajectory TrajectoryOptimizer::optimizeR2(
       if (gs_norm > 100.0) grad_smooth *= 100.0 / gs_norm;
       grad_pos += params_.lambda_smooth * grad_smooth;
 
+      // --- Safety: SVSDF penalty (also needed for R² segments near obstacles) ---
+      if (svsdf_) {
+        SE2State st_i(wps[i].x, wps[i].y, wps[i].yaw);
+        double sdf_val = svsdf_->evaluate(st_i);
+        if (sdf_val < params_.safety_margin) {
+          Eigen::Vector2d gp;
+          double gy;
+          svsdf_->gradient(st_i, gp, gy);
+          double pen = params_.safety_margin - sdf_val;
+          grad_pos -= params_.lambda_safety * 2.0 * pen * gp;
+        }
+      }
+
       // --- Position residual: stay near reference waypoint ---
       Eigen::Vector2d ref_pos(ref[i].x, ref[i].y);
       grad_pos += params_.lambda_pos_residual * 2.0 *
