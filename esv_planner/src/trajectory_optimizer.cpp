@@ -543,18 +543,23 @@ Trajectory TrajectoryOptimizer::stitch(
   size_t count = std::min(segments.size(), optimized.size());
   if (count == 0) return Trajectory();
 
-  // Collect all waypoints from optimised segments
+  // Collect optimised waypoints by sampling per-segment trajectories
   std::vector<Eigen::Vector2d> all_pos;
   std::vector<double> all_yaws;
 
   for (size_t i = 0; i < count; ++i) {
-    const auto& seg_wps = segments[i].waypoints;
-    // Use the segment's original (gradient-optimised) waypoints
-    for (size_t j = 0; j < seg_wps.size(); ++j) {
-      // Skip first point of subsequent segments (shared with previous)
-      if (i > 0 && j == 0) continue;
-      all_pos.push_back(Eigen::Vector2d(seg_wps[j].x, seg_wps[j].y));
-      all_yaws.push_back(seg_wps[j].yaw);
+    const Trajectory& seg_traj = optimized[i];
+    if (seg_traj.empty()) continue;
+    double dur = seg_traj.totalDuration();
+    double sample_step = 0.15;  // match disc_step
+    int n_samples = std::max(2, static_cast<int>(std::ceil(dur / sample_step)) + 1);
+    for (int s = 0; s < n_samples; ++s) {
+      double t = (s == n_samples - 1) ? dur : s * sample_step;
+      // Skip first sample of subsequent segments (shared endpoint)
+      if (i > 0 && s == 0) continue;
+      SE2State st = seg_traj.sample(t);
+      all_pos.push_back(Eigen::Vector2d(st.x, st.y));
+      all_yaws.push_back(st.yaw);
     }
   }
 
