@@ -224,21 +224,29 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
       Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
       double grad_yaw = 0.0;
 
-      // --- Smoothness: finite-difference approximation ---
+      // --- Smoothness: time-aware finite-difference (paper Eq.3 J_s) ---
       double dt_prev = durations[i - 1];
       double dt_next = durations[i];
-      double dt_avg = 0.5 * (dt_prev + dt_next);
-      if (dt_avg < 0.05) dt_avg = 0.05;
+      double dt_avg = std::max(0.05, 0.5 * (dt_prev + dt_next));
 
-      // Second-order finite difference (dimensionless for stability)
-      Eigen::Vector2d dd = positions[i + 1] - 2.0 * positions[i] + positions[i - 1];
-      Eigen::Vector2d grad_smooth = -4.0 * dd;
+      // Acceleration approximation at waypoint i
+      Eigen::Vector2d acc_approx =
+          (positions[i + 1] - 2.0 * positions[i] + positions[i - 1]) /
+          (dt_avg * dt_avg);
+      // Gradient of ||acc||^2 w.r.t. positions[i]: -4*acc / dt^2
+      // Clamp to prevent blow-up
+      Eigen::Vector2d grad_smooth = -4.0 * acc_approx / (dt_avg * dt_avg);
+      double gs_norm = grad_smooth.norm();
+      if (gs_norm > 100.0) grad_smooth *= 100.0 / gs_norm;
       grad_pos += params_.lambda_smooth * grad_smooth;
 
-      // Yaw smoothness.
-      double yaw_dd = normalizeAngle(yaws[i + 1] - yaws[i]) -
-                       normalizeAngle(yaws[i] - yaws[i - 1]);
-      grad_yaw += params_.lambda_smooth * (-4.0 * yaw_dd);
+      // Yaw smoothness
+      double yaw_dd = (normalizeAngle(yaws[i + 1] - yaws[i]) -
+                       normalizeAngle(yaws[i] - yaws[i - 1])) /
+                      (dt_avg * dt_avg);
+      double yaw_grad = params_.lambda_smooth * (-4.0 * yaw_dd / (dt_avg * dt_avg));
+      if (std::abs(yaw_grad) > 100.0) yaw_grad = (yaw_grad > 0) ? 100.0 : -100.0;
+      grad_yaw += yaw_grad;
 
       // --- Safety: SVSDF penalty when distance < safety_margin ---
       if (svsdf_) {
@@ -268,6 +276,21 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
         grad_pos += params_.lambda_dynamics * excess *
                     (positions[i] - mid) / (vel_norm + 1e-12);
       }
+
+      // --- Dynamics: penalise acceleration exceeding max_acc ---
+      Eigen::Vector2d acc_est = acc_approx;  // reuse from smoothness
+      double acc_norm = acc_est.norm();
+      if (acc_norm > params_.max_acc) {
+        double excess_a = acc_norm - params_.max_acc;
+        // Push waypoint to reduce curvature
+        grad_pos += params_.lambda_dynamics * excess_a *
+                    (-2.0 * acc_est) / (acc_norm * dt_avg * dt_avg + 1e-12);
+      }
+
+      // Clamp total gradient to prevent instability
+      double total_g = grad_pos.norm();
+      if (total_g > 50.0) grad_pos *= 50.0 / total_g;
+      if (std::abs(grad_yaw) > 50.0) grad_yaw = (grad_yaw > 0) ? 50.0 : -50.0;
 
       // Apply gradient step.
       wps[i].x -= step * grad_pos.x();
@@ -329,13 +352,15 @@ Trajectory TrajectoryOptimizer::optimizeR2(
 
       double dt_prev = durations[i - 1];
       double dt_next = durations[i];
-      double dt_avg = 0.5 * (dt_prev + dt_next);
-      if (dt_avg < 0.05) dt_avg = 0.05;
+      double dt_avg = std::max(0.05, 0.5 * (dt_prev + dt_next));
 
-      // --- Smoothness ---
-      Eigen::Vector2d dd =
-          positions[i + 1] - 2.0 * positions[i] + positions[i - 1];
-      Eigen::Vector2d grad_smooth = -4.0 * dd;
+      // --- Smoothness (time-aware) ---
+      Eigen::Vector2d acc_approx =
+          (positions[i + 1] - 2.0 * positions[i] + positions[i - 1]) /
+          (dt_avg * dt_avg);
+      Eigen::Vector2d grad_smooth = -4.0 * acc_approx / (dt_avg * dt_avg);
+      double gs_norm = grad_smooth.norm();
+      if (gs_norm > 100.0) grad_smooth *= 100.0 / gs_norm;
       grad_pos += params_.lambda_smooth * grad_smooth;
 
       // --- Position residual: stay near reference waypoint ---
