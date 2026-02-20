@@ -55,6 +55,7 @@ private:
   bool has_map_ = false;
   bool has_start_ = false;
   bool has_goal_ = false;
+  std::vector<MotionSegment> last_segments_;
 
   // Parameters
   int num_samples_, knn_, max_paths_;
@@ -182,6 +183,7 @@ private:
     }
 
     std::vector<Trajectory> candidates;
+    std::vector<std::vector<MotionSegment>> all_segments;
 
     for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
       // Stage 2: SE(2) motion sequence
@@ -204,6 +206,7 @@ private:
       Trajectory full = optimizer_.stitch(segments, seg_trajs);
       if (!full.empty()) {
         candidates.push_back(full);
+        all_segments.push_back(segments);
       }
     }
 
@@ -214,13 +217,25 @@ private:
 
     Trajectory best = optimizer_.selectBest(candidates);
 
+    // Find which candidate was selected and store its segments
+    last_segments_.clear();
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      if (&candidates[i] == &best || candidates[i].pos_pieces.size() == best.pos_pieces.size()) {
+        last_segments_ = all_segments[i];
+        break;
+      }
+    }
+    if (last_segments_.empty() && !all_segments.empty()) {
+      last_segments_ = all_segments[0];
+    }
+
     ros::Time t1 = ros::Time::now();
     double solve_time = (t1 - t0).toSec();
     ROS_INFO("=== Planning done: %.3f s, %zu candidates ===", solve_time, candidates.size());
 
     // Publish
     publishTrajectory(best);
-    publishMarkers(topo_paths, best);
+    publishMarkers(topo_paths, best, last_segments_);
 
     std_msgs::Float64 time_msg;
     time_msg.data = solve_time;
@@ -248,7 +263,41 @@ private:
     traj_pub_.publish(path_msg);
   }
 
-  void publishMarkers(const std::vector<TopoPath>& topo_paths, const Trajectory& best) {
+  visualization_msgs::Marker makeFootprintMarker(
+      int& id, const std::string& ns, double x, double y, double yaw,
+      float r, float g, float b, float a, double scale_x) {
+    visualization_msgs::Marker m;
+    m.header.frame_id = "map";
+    m.header.stamp = ros::Time::now();
+    m.ns = ns;
+    m.id = id++;
+    m.type = visualization_msgs::Marker::LINE_STRIP;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = scale_x;
+    m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = a;
+
+    auto verts = footprint_.rotatedVertices(yaw);
+    for (const auto& v : verts) {
+      geometry_msgs::Point p;
+      p.x = v.x() + x;
+      p.y = v.y() + y;
+      p.z = 0.15;
+      m.points.push_back(p);
+    }
+    // Close polygon
+    if (!verts.empty()) {
+      geometry_msgs::Point p;
+      p.x = verts[0].x() + x;
+      p.y = verts[0].y() + y;
+      p.z = 0.15;
+      m.points.push_back(p);
+    }
+    return m;
+  }
+
+  void publishMarkers(const std::vector<TopoPath>& topo_paths,
+                       const Trajectory& best,
+                       const std::vector<MotionSegment>& segments) {
     visualization_msgs::MarkerArray ma;
     int id = 0;
 
@@ -300,6 +349,82 @@ private:
         p.y = st.y;
         p.z = 0.1;
         m.points.push_back(p);
+      }
+      ma.markers.push_back(m);
+    }
+
+    // 1) Robot footprint polygons along best trajectory (ns="footprint")
+    {
+      double total = best.totalDuration();
+      for (double t = 0.0; t <= total; t += 0.3) {
+        SE2State st = best.sample(t);
+        ma.markers.push_back(
+            makeFootprintMarker(id, "footprint", st.x, st.y, st.yaw,
+                                0.0f, 0.8f, 0.0f, 0.5f, 0.02));
+      }
+    }
+
+    // 2) SE(2) vs R2 segment coloring (ns="segments")
+    for (const auto& seg : segments) {
+      visualization_msgs::Marker m;
+      m.header.frame_id = "map";
+      m.header.stamp = ros::Time::now();
+      m.ns = "segments";
+      m.id = id++;
+      m.type = visualization_msgs::Marker::LINE_STRIP;
+      m.action = visualization_msgs::Marker::ADD;
+      m.scale.x = 0.04;
+      if (seg.risk == RiskLevel::HIGH) {
+        m.color.r = 1.0f; m.color.g = 0.2f; m.color.b = 0.2f; m.color.a = 0.8f;
+      } else {
+        m.color.r = 0.2f; m.color.g = 0.2f; m.color.b = 1.0f; m.color.a = 0.8f;
+      }
+      for (const auto& wp : seg.waypoints) {
+        geometry_msgs::Point p;
+        p.x = wp.x;
+        p.y = wp.y;
+        p.z = 0.12;
+        m.points.push_back(p);
+      }
+      ma.markers.push_back(m);
+    }
+
+    // 3) Start and goal footprint (ns="start_goal")
+    ma.markers.push_back(
+        makeFootprintMarker(id, "start_goal", start_.x, start_.y, start_.yaw,
+                            0.0f, 1.0f, 1.0f, 1.0f, 0.03));
+    ma.markers.push_back(
+        makeFootprintMarker(id, "start_goal", goal_.x, goal_.y, goal_.yaw,
+                            1.0f, 0.0f, 1.0f, 1.0f, 0.03));
+
+    // 4) Waypoint markers (ns="waypoints")
+    {
+      visualization_msgs::Marker m;
+      m.header.frame_id = "map";
+      m.header.stamp = ros::Time::now();
+      m.ns = "waypoints";
+      m.id = id++;
+      m.type = visualization_msgs::Marker::SPHERE_LIST;
+      m.action = visualization_msgs::Marker::ADD;
+      m.scale.x = 0.05;
+      m.scale.y = 0.05;
+      m.scale.z = 0.05;
+
+      for (const auto& seg : segments) {
+        std_msgs::ColorRGBA c;
+        if (seg.risk == RiskLevel::HIGH) {
+          c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 1.0f;
+        } else {
+          c.r = 0.0f; c.g = 0.0f; c.b = 1.0f; c.a = 1.0f;
+        }
+        for (const auto& wp : seg.waypoints) {
+          geometry_msgs::Point p;
+          p.x = wp.x;
+          p.y = wp.y;
+          p.z = 0.2;
+          m.points.push_back(p);
+          m.colors.push_back(c);
+        }
       }
       ma.markers.push_back(m);
     }
