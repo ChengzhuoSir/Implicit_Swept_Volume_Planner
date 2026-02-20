@@ -306,20 +306,38 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
     if (total_grad_norm < 1e-10) break;
   }
 
-  // Final MINCO quintic fit through optimised waypoints.
-  std::vector<Eigen::Vector2d> final_pos(n_wps);
-  std::vector<double> final_yaws(n_wps);
-  for (int i = 0; i < n_wps; ++i) {
-    final_pos[i] = Eigen::Vector2d(wps[i].x, wps[i].y);
-    final_yaws[i] = wps[i].yaw;
+  // Downsample optimised waypoints for MINCO fitting.
+  // Keep first, last, and every N-th point to avoid overfitting.
+  double min_piece_len = 0.5;  // minimum ~0.5m per MINCO piece
+  std::vector<Eigen::Vector2d> final_pos;
+  std::vector<double> final_yaws;
+  final_pos.push_back(Eigen::Vector2d(wps[0].x, wps[0].y));
+  final_yaws.push_back(wps[0].yaw);
+
+  double accum_dist = 0.0;
+  for (int i = 1; i < n_wps; ++i) {
+    double dx = wps[i].x - wps[i - 1].x;
+    double dy = wps[i].y - wps[i - 1].y;
+    accum_dist += std::sqrt(dx * dx + dy * dy);
+    if (accum_dist >= min_piece_len || i == n_wps - 1) {
+      final_pos.push_back(Eigen::Vector2d(wps[i].x, wps[i].y));
+      final_yaws.push_back(wps[i].yaw);
+      accum_dist = 0.0;
+    }
   }
 
+  std::vector<SE2State> ds_wps(final_pos.size());
+  for (size_t i = 0; i < final_pos.size(); ++i) {
+    ds_wps[i] = SE2State(final_pos[i].x(), final_pos[i].y(), final_yaws[i]);
+  }
+  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
+
   Trajectory traj;
-  fitMincoQuintic(final_pos, durations,
+  fitMincoQuintic(final_pos, ds_durations,
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
-  fitYawQuintic(final_yaws, durations, 0.0, 0.0, traj.yaw_pieces);
+  fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
   return traj;
 }
 
@@ -418,29 +436,52 @@ Trajectory TrajectoryOptimizer::optimizeR2(
     if (total_grad_norm < 1e-10) break;
   }
 
-  // Derive yaw from velocity direction.
-  std::vector<Eigen::Vector2d> final_pos(n_wps);
-  std::vector<double> final_yaws(n_wps);
+  // Derive yaw from velocity direction, then downsample for MINCO.
+  std::vector<Eigen::Vector2d> all_pos(n_wps);
+  std::vector<double> all_yaws(n_wps);
   for (int i = 0; i < n_wps; ++i) {
-    final_pos[i] = Eigen::Vector2d(wps[i].x, wps[i].y);
+    all_pos[i] = Eigen::Vector2d(wps[i].x, wps[i].y);
   }
-  final_yaws[0] = wps[0].yaw;
-  final_yaws[n_wps - 1] = wps[n_wps - 1].yaw;
+  all_yaws[0] = wps[0].yaw;
+  all_yaws[n_wps - 1] = wps[n_wps - 1].yaw;
   for (int i = 1; i < n_wps - 1; ++i) {
-    Eigen::Vector2d vel_dir = final_pos[i + 1] - final_pos[i - 1];
+    Eigen::Vector2d vel_dir = all_pos[i + 1] - all_pos[i - 1];
     if (vel_dir.norm() > 1e-9) {
-      final_yaws[i] = std::atan2(vel_dir.y(), vel_dir.x());
+      all_yaws[i] = std::atan2(vel_dir.y(), vel_dir.x());
     } else {
-      final_yaws[i] = final_yaws[i - 1];
+      all_yaws[i] = all_yaws[i - 1];
     }
   }
 
+  // Downsample: keep first, last, and points every ~0.5m
+  double min_piece_len = 0.5;
+  std::vector<Eigen::Vector2d> final_pos;
+  std::vector<double> final_yaws;
+  final_pos.push_back(all_pos[0]);
+  final_yaws.push_back(all_yaws[0]);
+
+  double accum_dist = 0.0;
+  for (int i = 1; i < n_wps; ++i) {
+    accum_dist += (all_pos[i] - all_pos[i - 1]).norm();
+    if (accum_dist >= min_piece_len || i == n_wps - 1) {
+      final_pos.push_back(all_pos[i]);
+      final_yaws.push_back(all_yaws[i]);
+      accum_dist = 0.0;
+    }
+  }
+
+  std::vector<SE2State> ds_wps(final_pos.size());
+  for (size_t i = 0; i < final_pos.size(); ++i) {
+    ds_wps[i] = SE2State(final_pos[i].x(), final_pos[i].y(), final_yaws[i]);
+  }
+  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
+
   Trajectory traj;
-  fitMincoQuintic(final_pos, durations,
+  fitMincoQuintic(final_pos, ds_durations,
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
-  fitYawQuintic(final_yaws, durations, 0.0, 0.0, traj.yaw_pieces);
+  fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
   return traj;
 }
 
