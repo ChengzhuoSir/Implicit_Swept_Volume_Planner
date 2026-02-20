@@ -18,7 +18,7 @@ struct OptimizerParams {
   double max_vel = 1.0;
   double max_acc = 2.0;
   double max_yaw_rate = 1.5;
-  double safety_margin = 0.05;        // SVSDF safety threshold (meters)
+  double safety_margin = 0.1;        // SVSDF safety threshold (meters)
   double step_size = 0.005;           // gradient descent step size
 };
 

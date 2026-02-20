@@ -33,7 +33,7 @@ std::vector<double> TrajectoryOptimizer::allocateTime(
   std::vector<double> durations(n);
   for (int i = 0; i < n; ++i) {
     durations[i] = total_time * dists[i] / total_dist;
-    if (durations[i] < 1e-6) durations[i] = 1e-6;
+    if (durations[i] < 0.01) durations[i] = 0.01;
   }
   return durations;
 }
@@ -77,11 +77,15 @@ void TrajectoryOptimizer::fitMincoQuintic(
   accs[0] = a0;
   accs[N] = af;
 
-  // Interior velocities: Catmull-Rom estimate.
+  // Interior velocities: Catmull-Rom estimate, clamped.
   for (int i = 1; i < N; ++i) {
     double dt_sum = durations[i - 1] + durations[i];
-    if (dt_sum < 1e-12) dt_sum = 1e-12;
+    if (dt_sum < 1e-6) dt_sum = 1e-6;
     vels[i] = (positions[i + 1] - positions[i - 1]) / dt_sum;
+    // Clamp velocity magnitude to avoid numerical blow-up
+    double v_norm = vels[i].norm();
+    double max_v = 5.0;  // generous clamp
+    if (v_norm > max_v) vels[i] *= max_v / v_norm;
     accs[i] = Eigen::Vector2d::Zero();
   }
 
@@ -119,7 +123,8 @@ void TrajectoryOptimizer::fitMincoQuintic(
 
       Eigen::Matrix<double, 6, 1> c = qr.solve(b);
       for (int j = 0; j < 6; ++j) {
-        piece.coeffs(axis, j) = c(j);
+        double val = c(j);
+        piece.coeffs(axis, j) = std::isfinite(val) ? val : 0.0;
       }
     }
     pieces[k] = piece;
@@ -219,25 +224,21 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
       Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
       double grad_yaw = 0.0;
 
-      // --- Smoothness: finite-difference approximation of jerk squared ---
+      // --- Smoothness: finite-difference approximation ---
       double dt_prev = durations[i - 1];
       double dt_next = durations[i];
       double dt_avg = 0.5 * (dt_prev + dt_next);
-      if (dt_avg < 1e-12) dt_avg = 1e-12;
+      if (dt_avg < 0.05) dt_avg = 0.05;
 
-      // Second-order finite difference ~ acceleration at waypoint i.
-      Eigen::Vector2d acc_approx =
-          (positions[i + 1] - 2.0 * positions[i] + positions[i - 1]) /
-          (dt_avg * dt_avg);
-      // Gradient of ||acc||^2 w.r.t. positions[i].
-      Eigen::Vector2d grad_smooth = -4.0 * acc_approx / (dt_avg * dt_avg);
+      // Second-order finite difference (dimensionless for stability)
+      Eigen::Vector2d dd = positions[i + 1] - 2.0 * positions[i] + positions[i - 1];
+      Eigen::Vector2d grad_smooth = -4.0 * dd;
       grad_pos += params_.lambda_smooth * grad_smooth;
 
       // Yaw smoothness.
-      double yaw_dd = (normalizeAngle(yaws[i + 1] - yaws[i]) -
-                       normalizeAngle(yaws[i] - yaws[i - 1])) /
-                      (dt_avg * dt_avg);
-      grad_yaw += params_.lambda_smooth * (-4.0 * yaw_dd / (dt_avg * dt_avg));
+      double yaw_dd = normalizeAngle(yaws[i + 1] - yaws[i]) -
+                       normalizeAngle(yaws[i] - yaws[i - 1]);
+      grad_yaw += params_.lambda_smooth * (-4.0 * yaw_dd);
 
       // --- Safety: SVSDF penalty when distance < safety_margin ---
       if (svsdf_) {
@@ -329,13 +330,12 @@ Trajectory TrajectoryOptimizer::optimizeR2(
       double dt_prev = durations[i - 1];
       double dt_next = durations[i];
       double dt_avg = 0.5 * (dt_prev + dt_next);
-      if (dt_avg < 1e-12) dt_avg = 1e-12;
+      if (dt_avg < 0.05) dt_avg = 0.05;
 
       // --- Smoothness ---
-      Eigen::Vector2d acc_approx =
-          (positions[i + 1] - 2.0 * positions[i] + positions[i - 1]) /
-          (dt_avg * dt_avg);
-      Eigen::Vector2d grad_smooth = -4.0 * acc_approx / (dt_avg * dt_avg);
+      Eigen::Vector2d dd =
+          positions[i + 1] - 2.0 * positions[i] + positions[i - 1];
+      Eigen::Vector2d grad_smooth = -4.0 * dd;
       grad_pos += params_.lambda_smooth * grad_smooth;
 
       // --- Position residual: stay near reference waypoint ---
@@ -361,15 +361,13 @@ Trajectory TrajectoryOptimizer::optimizeR2(
           if (vn.norm() > 1e-9) yaw_next = std::atan2(vn.y(), vn.x());
         }
 
-        double yaw_dd = (normalizeAngle(yaw_next - yaw_curr) -
-                         normalizeAngle(yaw_curr - yaw_prev)) /
-                        (dt_avg * dt_avg);
+        double yaw_dd = normalizeAngle(yaw_next - yaw_curr) -
+                         normalizeAngle(yaw_curr - yaw_prev);
 
         // Gradient direction: perpendicular to velocity.
         Eigen::Vector2d perp(-vel_dir.y(), vel_dir.x());
         perp /= vel_norm;
-        grad_pos += params_.lambda_yaw_residual * yaw_dd * perp /
-                    (dt_avg * dt_avg);
+        grad_pos += params_.lambda_yaw_residual * yaw_dd * perp;
       }
 
       wps[i].x -= step * grad_pos.x();
