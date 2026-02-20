@@ -20,13 +20,17 @@ fi
 
 # Check dependencies
 echo "Checking dependencies..."
-for pkg in roscpp geometry_msgs nav_msgs visualization_msgs std_msgs tf2 tf2_ros; do
+for pkg in roscpp geometry_msgs nav_msgs visualization_msgs std_msgs tf2 tf2_ros map_server; do
     if rospack find "$pkg" > /dev/null 2>&1; then
         echo "  [OK] $pkg"
     else
         echo "  [MISSING] $pkg"
     fi
 done
+
+if ! rospack find map_server > /dev/null 2>&1; then
+    echo "  [HINT] install map_server with: sudo apt install ros-noetic-map-server"
+fi
 
 # Check Eigen3
 if pkg-config --exists eigen3 2>/dev/null; then

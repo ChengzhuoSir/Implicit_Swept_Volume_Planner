@@ -1,7 +1,15 @@
 <launch>
-  <!-- Map server -->
-  <node name="map_server" pkg="map_server" type="map_server"
-        args="$(find esv_planner)/maps/office.yaml" />
+  <!-- Optional map_server:
+       set use_map_server:=true when ros-noetic-map-server is installed
+       and you want to load the bundled office map -->
+  <arg name="use_map_server" default="false" />
+  <arg name="map_file" default="$(find esv_planner)/maps/office.yaml" />
+  <node if="$(arg use_map_server)"
+        name="map_server"
+        pkg="map_server"
+        type="map_server"
+        args="$(arg map_file)"
+        required="false" />
 
   <!-- ESV Planner -->
   <include file="$(find esv_planner)/launch/planner.launch" />
