@@ -229,7 +229,7 @@ int main(int argc, char** argv)
   // TopologyPlanner
   TopologyPlanner topo;
   topo.init(grid_map, checker,
-            /*num_samples=*/520, /*knn=*/18, /*max_paths=*/14,
+            /*num_samples=*/800, /*knn=*/20, /*max_paths=*/14,
             footprint.inscribedRadius());
 
   // SE2SequenceGenerator
