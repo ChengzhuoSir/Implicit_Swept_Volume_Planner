@@ -8,7 +8,7 @@
 namespace esv_planner {
 
 struct OptimizerParams {
-  int max_iterations = 100;
+  int max_iterations = 30;
   double lambda_smooth = 1.0;
   double lambda_time = 1.0;
   double lambda_safety = 50.0;

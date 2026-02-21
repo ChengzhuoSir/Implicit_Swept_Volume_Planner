@@ -1,0 +1,18 @@
+[100%] Built target benchmark_planner
+[100%] Built target test_planner
+[100%] Built target esv_planner_node
+Base path: /home/chengzhuo/workspace/plan
+Source space: /home/chengzhuo/workspace/plan/src
+Build space: /home/chengzhuo/workspace/plan/build
+Devel space: /home/chengzhuo/workspace/plan/devel
+Install space: /home/chengzhuo/workspace/plan/install
+####
+#### Running command: "make cmake_check_build_system" in "/home/chengzhuo/workspace/plan/build"
+####
+####
+#### Running command: "make -j24 -l24" in "/home/chengzhuo/workspace/plan/build"
+####
+$ catkin_make
+
+
+[exit_code] 0

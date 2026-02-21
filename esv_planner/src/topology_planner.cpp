@@ -7,6 +7,7 @@
 #include <numeric>
 #include <unordered_set>
 #include <cassert>
+#include <string>
 
 namespace esv_planner {
 
@@ -196,14 +197,42 @@ dijkstraFull(int src, int dst, int n,
   return {dist[dst], prev};
 }
 
-static std::vector<int> reconstructIndices(const std::vector<int>& prev, int dst) {
-  if (prev[dst] == -1 && dst != 0) return {};  // unreachable
+static std::vector<int> reconstructIndices(const std::vector<int>& prev, int src, int dst) {
+  if (src < 0 || dst < 0 || src >= static_cast<int>(prev.size()) ||
+      dst >= static_cast<int>(prev.size())) {
+    return {};
+  }
+  if (src == dst) return {src};
+  if (prev[dst] == -1) return {};  // unreachable
+
   std::vector<int> path;
   for (int v = dst; v != -1; v = prev[v]) {
     path.push_back(v);
+    if (v == src) break;
   }
+  if (path.empty() || path.back() != src) return {};
   std::reverse(path.begin(), path.end());
   return path;
+}
+
+static double pathCostFromAdj(const std::vector<int>& idx_path,
+                              const std::vector<std::vector<std::pair<int, double>>>& adj) {
+  if (idx_path.size() <= 1) return 0.0;
+  double total = 0.0;
+  for (size_t i = 1; i < idx_path.size(); ++i) {
+    int u = idx_path[i - 1];
+    int v = idx_path[i];
+    double w = kInf;
+    for (const auto& e : adj[u]) {
+      if (e.first == v) {
+        w = e.second;
+        break;
+      }
+    }
+    if (!std::isfinite(w)) return kInf;
+    total += w;
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,36 +242,120 @@ std::vector<TopoPath> TopologyPlanner::searchPaths() {
   std::vector<TopoPath> result;
   if (nodes_.size() < 2) return result;
 
-  int n = static_cast<int>(nodes_.size());
+  const int n = static_cast<int>(nodes_.size());
+  const int src = 0;
+  const int dst = 1;
 
-  // Progressive penalty: each found path penalizes its nodes
-  std::vector<double> node_penalty(n, 0.0);
-  double penalty_step = 5.0;  // strong penalty to force different regions
+  struct CandidatePath {
+    std::vector<int> indices;
+    double cost = kInf;
+    bool operator>(const CandidatePath& o) const {
+      if (cost != o.cost) return cost > o.cost;
+      return indices.size() > o.indices.size();
+    }
+  };
 
-  for (int attempt = 0; attempt < max_paths_ * 6 &&
-       static_cast<int>(result.size()) < max_paths_; ++attempt) {
+  std::vector<CandidatePath> A;  // accepted K-shortest index paths
+  std::priority_queue<CandidatePath, std::vector<CandidatePath>,
+                      std::greater<CandidatePath>> B;  // candidates
+  std::unordered_set<std::string> seen;
 
-    TopoPath path = dijkstra(0, 1, node_penalty);
-    if (path.points.empty()) break;
+  auto keyOf = [](const std::vector<int>& p) {
+    std::string k;
+    k.reserve(p.size() * 6);
+    for (size_t i = 0; i < p.size(); ++i) {
+      if (i > 0) k.push_back('-');
+      k += std::to_string(p[i]);
+    }
+    return k;
+  };
 
+  auto pushCandidate = [&](const std::vector<int>& idx_path) {
+    if (idx_path.size() < 2) return;
+    double c = pathCostFromAdj(idx_path, adjacency_);
+    if (!std::isfinite(c)) return;
+    std::string key = keyOf(idx_path);
+    if (!seen.insert(key).second) return;
+    B.push(CandidatePath{idx_path, c});
+  };
+
+  // 1) First shortest path
+  {
+    const std::set<std::pair<int, int>> blocked_edges;
+    const std::unordered_set<int> blocked_nodes;
+    auto d = dijkstraFull(src, dst, n, adjacency_, blocked_edges, blocked_nodes);
+    if (d.first >= kInf) return result;
+    std::vector<int> shortest = reconstructIndices(d.second, src, dst);
+    if (shortest.size() < 2) return result;
+    A.push_back(CandidatePath{shortest, d.first});
+  }
+
+  // 2) Yen's algorithm
+  for (int k = 1; k < max_paths_; ++k) {
+    const std::vector<int>& prev_path = A[k - 1].indices;
+    if (prev_path.size() < 2) break;
+
+    for (size_t i = 0; i + 1 < prev_path.size(); ++i) {
+      int spur_node = prev_path[i];
+      std::vector<int> root_path(prev_path.begin(), prev_path.begin() + i + 1);
+
+      std::set<std::pair<int, int>> blocked_edges;
+      std::unordered_set<int> blocked_nodes;
+
+      // Block edges that would reproduce previous paths sharing this root.
+      for (const auto& accepted : A) {
+        if (accepted.indices.size() <= i) continue;
+        bool same_root = true;
+        for (size_t r = 0; r <= i; ++r) {
+          if (accepted.indices[r] != root_path[r]) {
+            same_root = false;
+            break;
+          }
+        }
+        if (same_root && i + 1 < accepted.indices.size()) {
+          blocked_edges.insert({accepted.indices[i], accepted.indices[i + 1]});
+        }
+      }
+
+      // Block root nodes (except spur node) to avoid loops.
+      for (size_t r = 0; r + 1 < root_path.size(); ++r) {
+        blocked_nodes.insert(root_path[r]);
+      }
+
+      auto spur = dijkstraFull(spur_node, dst, n, adjacency_, blocked_edges, blocked_nodes);
+      if (spur.first >= kInf) continue;
+
+      std::vector<int> spur_path = reconstructIndices(spur.second, spur_node, dst);
+      if (spur_path.size() < 2) continue;
+
+      std::vector<int> total = root_path;
+      total.insert(total.end(), spur_path.begin() + 1, spur_path.end());
+      pushCandidate(total);
+    }
+
+    if (B.empty()) break;
+    A.push_back(B.top());
+    B.pop();
+  }
+
+  // 3) Convert to geometric paths and keep topologically distinct ones.
+  for (const auto& cand : A) {
+    TopoPath path;
+    path.points.reserve(cand.indices.size());
+    for (int idx : cand.indices) {
+      if (idx < 0 || idx >= n) {
+        path.points.clear();
+        break;
+      }
+      path.points.push_back(nodes_[idx]);
+    }
+    if (path.points.size() < 2) continue;
+    path.computeLength();
     if (isTopologicallyDistinct(path, result)) {
       result.push_back(path);
     }
-
-    // Penalize all nodes along this path
-    for (const auto& pt : path.points) {
-      for (int i = 2; i < n; ++i) {  // skip start(0) and goal(1)
-        if ((nodes_[i] - pt).norm() < map_->resolution() * 3.0) {
-          node_penalty[i] += penalty_step;
-        }
-      }
-    }
-    // Increase penalty each round
-    penalty_step *= 1.3;
+    if (static_cast<int>(result.size()) >= max_paths_) break;
   }
-
-  std::sort(result.begin(), result.end(),
-            [](const TopoPath& a, const TopoPath& b) { return a.length < b.length; });
 
   return result;
 }

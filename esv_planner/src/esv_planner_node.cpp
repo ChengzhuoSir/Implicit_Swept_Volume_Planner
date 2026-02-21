@@ -6,6 +6,8 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <std_msgs/Float64.h>
 #include <tf2/utils.h>
+#include <algorithm>
+#include <cmath>
 
 #include "esv_planner/common.h"
 #include "esv_planner/grid_map.h"
@@ -13,6 +15,7 @@
 #include "esv_planner/collision_checker.h"
 #include "esv_planner/topology_planner.h"
 #include "esv_planner/se2_sequence_generator.h"
+#include "esv_planner/hybrid_astar.h"
 #include "esv_planner/svsdf_evaluator.h"
 #include "esv_planner/trajectory_optimizer.h"
 
@@ -36,6 +39,7 @@ private:
 
   // Publishers
   ros::Publisher traj_pub_;
+  ros::Publisher traj_astar_pub_;
   ros::Publisher marker_pub_;
   ros::Publisher time_pub_;
 
@@ -45,9 +49,11 @@ private:
   CollisionChecker collision_checker_;
   TopologyPlanner topology_planner_;
   SE2SequenceGenerator se2_generator_;
+  HybridAStarPlanner hybrid_astar_;
   SvsdfEvaluator svsdf_evaluator_;
   TrajectoryOptimizer optimizer_;
   OptimizerParams opt_params_;
+  HybridAStarParams hybrid_params_;
 
   // State
   SE2State start_;
@@ -106,6 +112,19 @@ private:
     pnh_.param("optimizer/safety_margin", opt_params_.safety_margin, 0.05);
     pnh_.param("optimizer/step_size", opt_params_.step_size, 0.005);
 
+    // Hybrid A*
+    pnh_.param("hybrid_astar/step_size", hybrid_params_.step_size, 0.35);
+    pnh_.param("hybrid_astar/wheel_base", hybrid_params_.wheel_base, 0.8);
+    pnh_.param("hybrid_astar/max_steer", hybrid_params_.max_steer, 0.6);
+    pnh_.param("hybrid_astar/steer_samples", hybrid_params_.steer_samples, 5);
+    pnh_.param("hybrid_astar/goal_tolerance_pos", hybrid_params_.goal_tolerance_pos, 0.35);
+    pnh_.param("hybrid_astar/goal_tolerance_yaw", hybrid_params_.goal_tolerance_yaw, 0.4);
+    pnh_.param("hybrid_astar/reverse_penalty", hybrid_params_.reverse_penalty, 2.0);
+    pnh_.param("hybrid_astar/steer_penalty", hybrid_params_.steer_penalty, 0.2);
+    pnh_.param("hybrid_astar/steer_change_penalty", hybrid_params_.steer_change_penalty, 0.2);
+    pnh_.param("hybrid_astar/switch_penalty", hybrid_params_.switch_penalty, 2.0);
+    pnh_.param("hybrid_astar/max_expansions", hybrid_params_.max_expansions, 50000);
+
     // Default start/goal
     double sx, sy, syaw, gx, gy, gyaw;
     pnh_.param("start_pose/x", sx, 1.0);
@@ -124,6 +143,7 @@ private:
     goal_sub_ = nh_.subscribe("/move_base_simple/goal", 1, &EsvPlannerNode::goalCallback, this);
 
     traj_pub_ = nh_.advertise<nav_msgs::Path>("/esv_planner/trajectory", 1);
+    traj_astar_pub_ = nh_.advertise<nav_msgs::Path>("/esv_planner/trajectory_astar", 1);
     marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/esv_planner/markers", 1);
     time_pub_ = nh_.advertise<std_msgs::Float64>("/esv_planner/solve_time", 1);
   }
@@ -138,6 +158,7 @@ private:
     topology_planner_.init(grid_map_, collision_checker_, num_samples_, knn_, max_paths_,
                            footprint_.inscribedRadius());
     se2_generator_.init(grid_map_, collision_checker_, disc_step_, max_push_);
+    hybrid_astar_.init(grid_map_, collision_checker_, hybrid_params_);
     svsdf_evaluator_.init(grid_map_, footprint_);
     optimizer_.init(grid_map_, svsdf_evaluator_, opt_params_);
 
@@ -170,6 +191,18 @@ private:
 
     ROS_INFO("=== ESV Planner: Starting planning ===");
     ros::Time t0 = ros::Time::now();
+    std::vector<SE2State> hybrid_path;
+
+    // Always try A* baseline, independent of ESV pipeline success.
+    bool hybrid_ok = hybrid_astar_.plan(start_, goal_, hybrid_path);
+    if (!hybrid_ok || hybrid_path.empty()) {
+      ROS_WARN("Hybrid A* failed or produced empty path. start=(%.2f, %.2f, %.2f), "
+               "goal=(%.2f, %.2f, %.2f)",
+               start_.x, start_.y, start_.yaw, goal_.x, goal_.y, goal_.yaw);
+    } else {
+      ROS_INFO("Hybrid A* path size: %zu", hybrid_path.size());
+      publishHybridPath(hybrid_path, traj_astar_pub_);
+    }
 
     // Stage 1: Topology path generation
     topology_planner_.buildRoadmap(start_.position(), goal_.position());
@@ -185,28 +218,137 @@ private:
     std::vector<Trajectory> candidates;
     std::vector<std::vector<MotionSegment>> all_segments;
 
+    auto segmentLength = [](const std::vector<SE2State>& wps) {
+      if (wps.size() < 2) return 0.0;
+      double len = 0.0;
+      for (size_t i = 1; i < wps.size(); ++i) {
+        double dx = wps[i].x - wps[i - 1].x;
+        double dy = wps[i].y - wps[i - 1].y;
+        len += std::sqrt(dx * dx + dy * dy);
+      }
+      return len;
+    };
+
+    auto validateTrajectory = [&](const Trajectory& traj,
+                                  double* out_min_svsdf,
+                                  double* out_max_vel,
+                                  double* out_max_acc) {
+      if (traj.empty()) return false;
+
+      double min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj, 0.05);
+      double max_vel = 0.0;
+      double max_acc = 0.0;
+      double total = traj.totalDuration();
+      for (double t = 0.0; t <= total; t += 0.02) {
+        Eigen::Vector2d v = traj.sampleVelocity(t);
+        Eigen::Vector2d a = traj.sampleAcceleration(t);
+        max_vel = std::max(max_vel, v.norm());
+        max_acc = std::max(max_acc, a.norm());
+      }
+
+      if (out_min_svsdf) *out_min_svsdf = min_svsdf;
+      if (out_max_vel) *out_max_vel = max_vel;
+      if (out_max_acc) *out_max_acc = max_acc;
+
+      bool collision_ok = (min_svsdf >= -opt_params_.safety_margin);
+      bool dynamics_ok = (max_vel <= opt_params_.max_vel * 1.10) &&
+                         (max_acc <= opt_params_.max_acc * 1.10);
+      return collision_ok && dynamics_ok;
+    };
+
     for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
       // Stage 2: SE(2) motion sequence
       auto segments = se2_generator_.generate(topo_paths[pi], start_, goal_);
       ROS_INFO("  Path %zu: %zu segments", pi, segments.size());
+      if (segments.empty()) {
+        ROS_WARN("  Path %zu discarded: no segments generated", pi);
+        continue;
+      }
 
       // Stage 3: Trajectory optimization
-      std::vector<Trajectory> seg_trajs;
-      for (const auto& seg : segments) {
-        double seg_time = seg.waypoints.size() * 0.3;  // rough time allocation
-        Trajectory seg_traj;
-        if (seg.risk == RiskLevel::HIGH) {
-          seg_traj = optimizer_.optimizeSE2(seg.waypoints, seg_time);
-        } else {
-          seg_traj = optimizer_.optimizeR2(seg.waypoints, seg_time);
+      std::vector<Trajectory> seg_trajs(segments.size());
+      std::vector<double> seg_times(segments.size(), 0.5);
+      for (size_t si = 0; si < segments.size(); ++si) {
+        double seg_len = segmentLength(segments[si].waypoints);
+        double est_time = seg_len / std::max(0.10, opt_params_.max_vel);
+        seg_times[si] = std::max(0.5, est_time);
+      }
+
+      bool path_valid = true;
+      // First: high-risk SE(2) segments must be feasible, otherwise discard path.
+      for (size_t si = 0; si < segments.size(); ++si) {
+        if (segments[si].risk != RiskLevel::HIGH) continue;
+        Trajectory seg_traj = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
+        if (seg_traj.empty()) {
+          path_valid = false;
+          break;
         }
-        seg_trajs.push_back(seg_traj);
+        double min_seg_svsdf = svsdf_evaluator_.evaluateTrajectory(seg_traj, 0.05);
+        if (min_seg_svsdf < -opt_params_.safety_margin) {
+          path_valid = false;
+          break;
+        }
+        seg_trajs[si] = seg_traj;
+      }
+      if (!path_valid) {
+        ROS_WARN("  Path %zu discarded: high-risk SE(2) segment infeasible", pi);
+        continue;
+      }
+
+      // Then optimize low-risk segments in R2.
+      for (size_t si = 0; si < segments.size(); ++si) {
+        if (segments[si].risk == RiskLevel::HIGH) continue;
+        Trajectory seg_traj = optimizer_.optimizeR2(segments[si].waypoints, seg_times[si]);
+        if (seg_traj.empty()) {
+          path_valid = false;
+          break;
+        }
+        seg_trajs[si] = seg_traj;
+      }
+      if (!path_valid) {
+        ROS_WARN("  Path %zu discarded: low-risk optimization failed", pi);
+        continue;
       }
 
       Trajectory full = optimizer_.stitch(segments, seg_trajs);
-      if (!full.empty()) {
+      if (full.empty()) {
+        ROS_WARN("  Path %zu discarded: stitch failed", pi);
+        continue;
+      }
+
+      double min_svsdf = 0.0, max_vel = 0.0, max_acc = 0.0;
+      bool valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc);
+      if (!valid) {
+        // Paper-aligned fallback: if full trajectory is unsafe, upgrade R2 to SE(2).
+        bool fallback_ok = true;
+        for (size_t si = 0; si < segments.size(); ++si) {
+          if (segments[si].risk == RiskLevel::HIGH) continue;
+          Trajectory reopt = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
+          if (reopt.empty()) {
+            fallback_ok = false;
+            break;
+          }
+          double min_seg_svsdf = svsdf_evaluator_.evaluateTrajectory(reopt, 0.05);
+          if (min_seg_svsdf < -opt_params_.safety_margin) {
+            fallback_ok = false;
+            break;
+          }
+          seg_trajs[si] = reopt;
+        }
+
+        if (fallback_ok) {
+          full = optimizer_.stitch(segments, seg_trajs);
+          valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc);
+        }
+      }
+
+      if (valid) {
+        ROS_INFO("  Path %zu accepted: min_svsdf=%.3f, vmax=%.3f, amax=%.3f",
+                 pi, min_svsdf, max_vel, max_acc);
         candidates.push_back(full);
         all_segments.push_back(segments);
+      } else {
+        ROS_WARN("  Path %zu discarded after validation/fallback", pi);
       }
     }
 
@@ -216,11 +358,16 @@ private:
     }
 
     Trajectory best = optimizer_.selectBest(candidates);
+    if (best.empty()) {
+      ROS_WARN("No valid trajectory selected!");
+      return;
+    }
 
     // Find which candidate was selected and store its segments
     last_segments_.clear();
     for (size_t i = 0; i < candidates.size(); ++i) {
-      if (&candidates[i] == &best || candidates[i].pos_pieces.size() == best.pos_pieces.size()) {
+      if (candidates[i].pos_pieces.size() == best.pos_pieces.size() &&
+          std::abs(candidates[i].totalDuration() - best.totalDuration()) < 1e-6) {
         last_segments_ = all_segments[i];
         break;
       }
@@ -234,15 +381,17 @@ private:
     ROS_INFO("=== Planning done: %.3f s, %zu candidates ===", solve_time, candidates.size());
 
     // Publish
-    publishTrajectory(best);
-    publishMarkers(topo_paths, best, last_segments_);
+    publishTrajectory(best, traj_pub_);
+    publishHybridPath(hybrid_path, traj_astar_pub_);
+    publishMarkers(topo_paths, best, last_segments_, hybrid_path);
 
     std_msgs::Float64 time_msg;
     time_msg.data = solve_time;
     time_pub_.publish(time_msg);
   }
 
-  void publishTrajectory(const Trajectory& traj) {
+  void publishTrajectory(const Trajectory& traj, const ros::Publisher& pub) {
+    if (traj.empty()) return;
     nav_msgs::Path path_msg;
     path_msg.header.stamp = ros::Time::now();
     path_msg.header.frame_id = "map";
@@ -260,7 +409,24 @@ private:
       path_msg.poses.push_back(ps);
     }
 
-    traj_pub_.publish(path_msg);
+    pub.publish(path_msg);
+  }
+
+  void publishHybridPath(const std::vector<SE2State>& path, const ros::Publisher& pub) {
+    if (path.empty()) return;
+    nav_msgs::Path path_msg;
+    path_msg.header.stamp = ros::Time::now();
+    path_msg.header.frame_id = "map";
+    for (const auto& st : path) {
+      geometry_msgs::PoseStamped ps;
+      ps.header = path_msg.header;
+      ps.pose.position.x = st.x;
+      ps.pose.position.y = st.y;
+      ps.pose.orientation.z = std::sin(st.yaw * 0.5);
+      ps.pose.orientation.w = std::cos(st.yaw * 0.5);
+      path_msg.poses.push_back(ps);
+    }
+    pub.publish(path_msg);
   }
 
   visualization_msgs::Marker makeFootprintMarker(
@@ -297,7 +463,8 @@ private:
 
   void publishMarkers(const std::vector<TopoPath>& topo_paths,
                        const Trajectory& best,
-                       const std::vector<MotionSegment>& segments) {
+                       const std::vector<MotionSegment>& segments,
+                       const std::vector<SE2State>& hybrid_path) {
     visualization_msgs::MarkerArray ma;
     int id = 0;
 
@@ -344,6 +511,30 @@ private:
       double total = best.totalDuration();
       for (double t = 0.0; t <= total; t += 0.05) {
         SE2State st = best.sample(t);
+        geometry_msgs::Point p;
+        p.x = st.x;
+        p.y = st.y;
+        p.z = 0.1;
+        m.points.push_back(p);
+      }
+      ma.markers.push_back(m);
+    }
+
+    // A* path
+    if (!hybrid_path.empty()) {
+      visualization_msgs::Marker m;
+      m.header.frame_id = "map";
+      m.header.stamp = ros::Time::now();
+      m.ns = "traj_astar";
+      m.id = id++;
+      m.type = visualization_msgs::Marker::LINE_STRIP;
+      m.action = visualization_msgs::Marker::ADD;
+      m.scale.x = 0.04;
+      m.color.r = 1.0;
+      m.color.g = 0.0;
+      m.color.b = 1.0;
+      m.color.a = 0.95;
+      for (const auto& st : hybrid_path) {
         geometry_msgs::Point p;
         p.x = st.x;
         p.y = st.y;

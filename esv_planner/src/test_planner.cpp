@@ -285,6 +285,41 @@ int main(int argc, char** argv)
   std::vector<Trajectory> candidates;
   candidates.reserve(paths.size());
 
+  auto segmentLength = [](const std::vector<SE2State>& wps) {
+    if (wps.size() < 2) return 0.0;
+    double len = 0.0;
+    for (size_t i = 1; i < wps.size(); ++i) {
+      double dx = wps[i].x - wps[i - 1].x;
+      double dy = wps[i].y - wps[i - 1].y;
+      len += std::sqrt(dx * dx + dy * dy);
+    }
+    return len;
+  };
+
+  auto validateTrajectory = [&](const Trajectory& traj,
+                                double* out_min_svsdf,
+                                double* out_max_vel,
+                                double* out_max_acc) {
+    if (traj.empty()) return false;
+    double min_svsdf = svsdf.evaluateTrajectory(traj, 0.05);
+    double max_vel = 0.0, max_acc = 0.0;
+    double duration = traj.totalDuration();
+    for (double t = 0.0; t <= duration; t += 0.02) {
+      Eigen::Vector2d vel = traj.sampleVelocity(t);
+      Eigen::Vector2d acc = traj.sampleAcceleration(t);
+      max_vel = std::max(max_vel, vel.norm());
+      max_acc = std::max(max_acc, acc.norm());
+    }
+    if (out_min_svsdf) *out_min_svsdf = min_svsdf;
+    if (out_max_vel) *out_max_vel = max_vel;
+    if (out_max_acc) *out_max_acc = max_acc;
+
+    bool collision_ok = (min_svsdf >= -opt_params.safety_margin);
+    bool dynamics_ok = (max_vel <= opt_params.max_vel * 1.10) &&
+                       (max_acc <= opt_params.max_acc * 1.10);
+    return collision_ok && dynamics_ok;
+  };
+
   for (size_t pi = 0; pi < paths.size(); ++pi) {
     std::cout << "\n--- Path " << pi << " ---\n";
 
@@ -309,35 +344,72 @@ int main(int argc, char** argv)
 
     if (segments.empty()) continue;
 
-    // Stage 3: Trajectory optimization per segment
-    double total_time = paths[pi].length / opt_params.max_vel;
-    if (total_time < 1.0) total_time = 1.0;
+    // Stage 3: Trajectory optimization with paper-aligned gating.
+    std::vector<Trajectory> seg_trajs(segments.size());
+    std::vector<double> seg_times(segments.size(), 0.5);
+    for (size_t si = 0; si < segments.size(); ++si) {
+      double seg_len = segmentLength(segments[si].waypoints);
+      seg_times[si] = std::max(0.5, seg_len / std::max(0.10, opt_params.max_vel));
+    }
 
-    std::vector<Trajectory> seg_trajs;
-    seg_trajs.reserve(segments.size());
+    bool path_valid = true;
+    for (size_t si = 0; si < segments.size(); ++si) {
+      if (segments[si].risk != RiskLevel::HIGH) continue;
+      Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -opt_params.safety_margin) {
+        path_valid = false;
+        break;
+      }
+      seg_trajs[si] = tr;
+    }
+    if (!path_valid) {
+      std::cout << "  [stage3] Path discarded: high-risk segment infeasible\n";
+      continue;
+    }
 
     for (size_t si = 0; si < segments.size(); ++si) {
-      double seg_time = total_time *
-          static_cast<double>(segments[si].waypoints.size()) /
-          static_cast<double>(std::max(total_wps, static_cast<size_t>(1)));
-      if (seg_time < 0.5) seg_time = 0.5;
-
-      Trajectory seg_traj;
-      if (segments[si].risk == RiskLevel::HIGH) {
-        seg_traj = optimizer.optimizeSE2(segments[si].waypoints, seg_time);
-      } else {
-        seg_traj = optimizer.optimizeR2(segments[si].waypoints, seg_time);
+      if (segments[si].risk == RiskLevel::HIGH) continue;
+      Trajectory tr = optimizer.optimizeR2(segments[si].waypoints, seg_times[si]);
+      if (tr.empty()) {
+        path_valid = false;
+        break;
       }
-      seg_trajs.push_back(seg_traj);
+      seg_trajs[si] = tr;
+    }
+    if (!path_valid) {
+      std::cout << "  [stage3] Path discarded: low-risk optimization failed\n";
+      continue;
     }
 
     Trajectory full_traj = optimizer.stitch(segments, seg_trajs);
-    if (!full_traj.empty()) {
+    double min_svsdf_path = 0.0, max_vel_path = 0.0, max_acc_path = 0.0;
+    bool valid = validateTrajectory(full_traj, &min_svsdf_path, &max_vel_path, &max_acc_path);
+    if (!valid) {
+      bool fallback_ok = true;
+      for (size_t si = 0; si < segments.size(); ++si) {
+        if (segments[si].risk == RiskLevel::HIGH) continue;
+        Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -opt_params.safety_margin) {
+          fallback_ok = false;
+          break;
+        }
+        seg_trajs[si] = tr;
+      }
+      if (fallback_ok) {
+        full_traj = optimizer.stitch(segments, seg_trajs);
+        valid = validateTrajectory(full_traj, &min_svsdf_path, &max_vel_path, &max_acc_path);
+      }
+    }
+
+    if (valid) {
       candidates.push_back(full_traj);
       std::cout << "  [stage3] Trajectory: duration=" << full_traj.totalDuration()
-                << " s  pieces=" << full_traj.pos_pieces.size() << "\n";
+                << " s  pieces=" << full_traj.pos_pieces.size()
+                << "  min_svsdf=" << min_svsdf_path
+                << "  vmax=" << max_vel_path
+                << "  amax=" << max_acc_path << "\n";
     } else {
-      std::cout << "  [stage3] Trajectory: EMPTY (optimization failed)\n";
+      std::cout << "  [stage3] Trajectory: INVALID after validation/fallback\n";
     }
   }
 
@@ -387,7 +459,10 @@ int main(int argc, char** argv)
   double dt_total_ms =
       std::chrono::duration<double, std::milli>(t_total_end - t_total_start).count();
 
-  bool pass = (min_svsdf > -opt_params.safety_margin) && (best_pieces > 0);
+  bool pass = (min_svsdf > -opt_params.safety_margin) &&
+              (best_pieces > 0) &&
+              (max_vel <= opt_params.max_vel * 1.10) &&
+              (max_acc <= opt_params.max_acc * 1.10);
 
   std::cout << "\n========================================\n";
   std::cout << "  DIAGNOSTICS\n";

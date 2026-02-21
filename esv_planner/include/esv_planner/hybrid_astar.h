@@ -1,0 +1,47 @@
+#pragma once
+
+#include <esv_planner/common.h>
+#include <esv_planner/grid_map.h>
+#include <esv_planner/collision_checker.h>
+#include <vector>
+
+namespace esv_planner {
+
+struct HybridAStarParams {
+  double step_size = 0.35;
+  double wheel_base = 0.8;
+  double max_steer = 0.6;
+  int steer_samples = 5;  // odd number, includes zero
+
+  double goal_tolerance_pos = 0.35;
+  double goal_tolerance_yaw = 0.4;
+
+  double reverse_penalty = 2.0;
+  double steer_penalty = 0.2;
+  double steer_change_penalty = 0.2;
+  double switch_penalty = 2.0;
+
+  int max_expansions = 50000;
+};
+
+class HybridAStarPlanner {
+public:
+  HybridAStarPlanner();
+
+  void init(const GridMap& map, const CollisionChecker& checker,
+            const HybridAStarParams& params);
+
+  // Traditional hybrid A*: SE(2) node search with kinematic motion primitives.
+  bool plan(const SE2State& start, const SE2State& goal, std::vector<SE2State>& path);
+
+private:
+  const GridMap* map_ = nullptr;
+  const CollisionChecker* checker_ = nullptr;
+  HybridAStarParams params_;
+
+  bool inBoundsAndFree(const SE2State& s) const;
+  double heuristic(const SE2State& a, const SE2State& b) const;
+  std::string keyOf(const SE2State& s) const;
+};
+
+}  // namespace esv_planner

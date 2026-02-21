@@ -36,6 +36,7 @@ add_executable(esv_planner_node
   src/collision_checker.cpp
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
+  src/hybrid_astar.cpp
   src/svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
@@ -57,6 +58,22 @@ add_executable(test_planner
 )
 
 target_link_libraries(test_planner
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(benchmark_planner
+  src/benchmark_planner.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(benchmark_planner
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )

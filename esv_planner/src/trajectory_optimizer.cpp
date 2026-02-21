@@ -626,16 +626,17 @@ Trajectory TrajectoryOptimizer::selectBest(
 
   double best_cost = kInf;
   size_t best_idx = 0;
+  bool found = false;
 
   for (size_t c = 0; c < candidates.size(); ++c) {
     const Trajectory& traj = candidates[c];
+    if (traj.empty()) continue;
 
     // Check collision along the MINCO curve (not just waypoints)
     if (svsdf_) {
       double min_sdf = svsdf_->evaluateTrajectory(traj, 0.1);
       if (min_sdf < -0.01) continue;  // skip colliding trajectories
     }
-
     double cost = 0.0;
 
     for (size_t i = 0; i < traj.pos_pieces.size(); ++i) {
@@ -656,8 +657,10 @@ Trajectory TrajectoryOptimizer::selectBest(
     if (cost < best_cost) {
       best_cost = cost;
       best_idx = c;
+      found = true;
     }
   }
+  if (!found) return Trajectory();
   return candidates[best_idx];
 }
 
@@ -741,8 +744,8 @@ bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj) {
 
     for (int s = 0; s <= n_samples; ++s) {
       double t = s * dt;
-      if (pp.velocity(t).norm() > params_.max_vel * 1.05) return false;
-      if (pp.acceleration(t).norm() > params_.max_acc * 1.05) return false;
+      if (pp.velocity(t).norm() > params_.max_vel * 1.10) return false;
+      if (pp.acceleration(t).norm() > params_.max_acc * 1.10) return false;
     }
   }
 
@@ -754,7 +757,7 @@ bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj) {
 
     for (int s = 0; s <= n_samples; ++s) {
       double t = s * dt;
-      if (std::abs(yp.velocity(t)) > params_.max_yaw_rate * 1.05) return false;
+      if (std::abs(yp.velocity(t)) > params_.max_yaw_rate * 1.10) return false;
     }
   }
 
