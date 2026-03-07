@@ -77,3 +77,29 @@ target_link_libraries(benchmark_planner
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
+
+add_executable(test_hybrid_astar_recovery
+  src/test_hybrid_astar_recovery.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/hybrid_astar.cpp
+)
+
+target_link_libraries(test_hybrid_astar_recovery
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_hybrid_astar_maze_cases
+  src/test_hybrid_astar_maze_cases.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/hybrid_astar.cpp
+)
+
+target_link_libraries(test_hybrid_astar_maze_cases
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)

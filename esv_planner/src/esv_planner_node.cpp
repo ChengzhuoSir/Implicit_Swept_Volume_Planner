@@ -124,6 +124,11 @@ private:
     pnh_.param("hybrid_astar/steer_change_penalty", hybrid_params_.steer_change_penalty, 0.2);
     pnh_.param("hybrid_astar/switch_penalty", hybrid_params_.switch_penalty, 2.0);
     pnh_.param("hybrid_astar/max_expansions", hybrid_params_.max_expansions, 50000);
+    pnh_.param("hybrid_astar/fast_pass_max_expansions", hybrid_params_.fast_pass_max_expansions, 8000);
+    pnh_.param("hybrid_astar/fast_pass_steer_samples", hybrid_params_.fast_pass_steer_samples, 3);
+    pnh_.param("hybrid_astar/pose_recovery_max_radius", hybrid_params_.pose_recovery_max_radius, 0.6);
+    pnh_.param("hybrid_astar/pose_recovery_radial_step", hybrid_params_.pose_recovery_radial_step, 0.05);
+    pnh_.param("hybrid_astar/pose_recovery_angular_samples", hybrid_params_.pose_recovery_angular_samples, 24);
 
     // Default start/goal
     double sx, sy, syaw, gx, gy, gyaw;

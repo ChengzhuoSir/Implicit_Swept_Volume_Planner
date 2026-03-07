@@ -43,6 +43,11 @@ hybrid_astar:
   steer_change_penalty: 0.2
   switch_penalty: 2.0
   max_expansions: 50000
+  fast_pass_max_expansions: 8000
+  fast_pass_steer_samples: 3
+  pose_recovery_max_radius: 0.6
+  pose_recovery_radial_step: 0.05
+  pose_recovery_angular_samples: 24
 
 # Default start/goal
 start_pose:
