@@ -24,6 +24,14 @@ public:
   // Geometry-aware path shortcut (Algorithm 1) with ESDF push-off
   void shortenPaths(std::vector<TopoPath>& paths);
 
+  size_t numNodes() const { return nodes_.size(); }
+  int startDegree() const {
+    return adjacency_.empty() ? 0 : static_cast<int>(adjacency_[0].size());
+  }
+  int goalDegree() const {
+    return adjacency_.size() < 2 ? 0 : static_cast<int>(adjacency_[1].size());
+  }
+
 private:
   const GridMap* map_ = nullptr;
   const CollisionChecker* checker_ = nullptr;

@@ -8,6 +8,7 @@
 #include <tf2/utils.h>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 #include "esv_planner/common.h"
 #include "esv_planner/grid_map.h"
@@ -217,7 +218,18 @@ private:
     ROS_INFO("Stage 1: Found %zu topological paths", topo_paths.size());
 
     if (topo_paths.empty()) {
-      ROS_WARN("No topological paths found!");
+      const double start_esdf = grid_map_.getEsdf(start_.x, start_.y);
+      const double goal_esdf = grid_map_.getEsdf(goal_.x, goal_.y);
+      const bool start_free = collision_checker_.isFree(start_);
+      const bool goal_free = collision_checker_.isFree(goal_);
+      ROS_WARN("No topological paths found! nodes=%zu start_degree=%d goal_degree=%d "
+               "start_esdf=%.3f goal_esdf=%.3f start_free=%d goal_free=%d",
+               topology_planner_.numNodes(),
+               topology_planner_.startDegree(),
+               topology_planner_.goalDegree(),
+               start_esdf, goal_esdf,
+               start_free ? 1 : 0,
+               goal_free ? 1 : 0);
       return;
     }
 
@@ -235,31 +247,75 @@ private:
       return len;
     };
 
-    auto validateTrajectory = [&](const Trajectory& traj,
-                                  double* out_min_svsdf,
-                                  double* out_max_vel,
-                                  double* out_max_acc) {
-      if (traj.empty()) return false;
-
-      double min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj, 0.05);
+    struct ValidationReport {
+      bool has_traj = false;
+      bool collision_free = false;
+      bool margin_ok = false;
+      bool dynamics_ok = false;
+      bool accepted_by_current_gate = false;
+      double min_svsdf = 0.0;
       double max_vel = 0.0;
       double max_acc = 0.0;
       double max_yaw_rate = 0.0;
-      bool dynamics_ok = optimizer_.dynamicsFeasible(
-          traj, &max_vel, &max_acc, &max_yaw_rate);
+    };
 
-      if (out_min_svsdf) *out_min_svsdf = min_svsdf;
-      if (out_max_vel) *out_max_vel = max_vel;
-      if (out_max_acc) *out_max_acc = max_acc;
+    auto inspectTrajectory = [&](const Trajectory& traj) {
+      ValidationReport report;
+      report.has_traj = !traj.empty();
+      if (!report.has_traj) {
+        return report;
+      }
 
-      bool collision_ok = (min_svsdf >= -opt_params_.safety_margin);
-      return collision_ok && dynamics_ok;
+      report.min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj, 0.05);
+      report.dynamics_ok = optimizer_.dynamicsFeasible(
+          traj, &report.max_vel, &report.max_acc, &report.max_yaw_rate);
+      report.collision_free = (report.min_svsdf >= 0.0);
+      report.margin_ok = (report.min_svsdf >= opt_params_.safety_margin);
+      report.accepted_by_current_gate =
+          (report.min_svsdf >= -opt_params_.safety_margin) && report.dynamics_ok;
+      return report;
+    };
+
+    auto formatValidation = [&](const ValidationReport& report) {
+      std::ostringstream oss;
+      if (!report.has_traj) {
+        oss << "traj=empty";
+        return oss.str();
+      }
+      oss << "min_svsdf=" << report.min_svsdf
+          << " collision_free=" << (report.collision_free ? 1 : 0)
+          << " margin_ok=" << (report.margin_ok ? 1 : 0)
+          << " dynamics_ok=" << (report.dynamics_ok ? 1 : 0)
+          << " vmax=" << report.max_vel
+          << " amax=" << report.max_acc
+          << " yaw_rate_max=" << report.max_yaw_rate;
+      return oss.str();
+    };
+
+    auto validateTrajectory = [&](const Trajectory& traj,
+                                  double* out_min_svsdf,
+                                  double* out_max_vel,
+                                  double* out_max_acc,
+                                  ValidationReport* out_report) {
+      ValidationReport report = inspectTrajectory(traj);
+      if (out_min_svsdf) *out_min_svsdf = report.min_svsdf;
+      if (out_max_vel) *out_max_vel = report.max_vel;
+      if (out_max_acc) *out_max_acc = report.max_acc;
+      if (out_report) *out_report = report;
+      return report.accepted_by_current_gate;
     };
 
     for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
       // Stage 2: SE(2) motion sequence
       auto segments = se2_generator_.generate(topo_paths[pi], start_, goal_);
-      ROS_INFO("  Path %zu: %zu segments", pi, segments.size());
+      size_t high_count = 0;
+      size_t low_count = 0;
+      for (const auto& seg : segments) {
+        if (seg.risk == RiskLevel::HIGH) ++high_count;
+        else ++low_count;
+      }
+      ROS_INFO("  Path %zu: %zu segments (high=%zu low=%zu)", pi, segments.size(),
+               high_count, low_count);
       if (segments.empty()) {
         ROS_WARN("  Path %zu discarded: no segments generated", pi);
         continue;
@@ -280,11 +336,15 @@ private:
         if (segments[si].risk != RiskLevel::HIGH) continue;
         Trajectory seg_traj = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
         if (seg_traj.empty()) {
+          ROS_WARN("  Path %zu discarded: high-risk segment %zu optimizeSE2 returned empty "
+                   "(wps=%zu est_time=%.3f)", pi, si, segments[si].waypoints.size(), seg_times[si]);
           path_valid = false;
           break;
         }
-        double min_seg_svsdf = svsdf_evaluator_.evaluateTrajectory(seg_traj, 0.05);
-        if (min_seg_svsdf < -opt_params_.safety_margin) {
+        ValidationReport seg_report = inspectTrajectory(seg_traj);
+        if (seg_report.min_svsdf < -opt_params_.safety_margin) {
+          ROS_WARN("  Path %zu discarded: high-risk segment %zu infeasible: %s",
+                   pi, si, formatValidation(seg_report).c_str());
           path_valid = false;
           break;
         }
@@ -300,6 +360,8 @@ private:
         if (segments[si].risk == RiskLevel::HIGH) continue;
         Trajectory seg_traj = optimizer_.optimizeR2(segments[si].waypoints, seg_times[si]);
         if (seg_traj.empty()) {
+          ROS_WARN("  Path %zu discarded: low-risk segment %zu optimizeR2 returned empty "
+                   "(wps=%zu est_time=%.3f)", pi, si, segments[si].waypoints.size(), seg_times[si]);
           path_valid = false;
           break;
         }
@@ -317,19 +379,26 @@ private:
       }
 
       double min_svsdf = 0.0, max_vel = 0.0, max_acc = 0.0;
-      bool valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc);
+      ValidationReport full_report;
+      bool valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc, &full_report);
       if (!valid) {
+        ROS_WARN("  Path %zu full validation failed: %s", pi,
+                 formatValidation(full_report).c_str());
         // Paper-aligned fallback: if full trajectory is unsafe, upgrade R2 to SE(2).
         bool fallback_ok = true;
         for (size_t si = 0; si < segments.size(); ++si) {
           if (segments[si].risk == RiskLevel::HIGH) continue;
           Trajectory reopt = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
           if (reopt.empty()) {
+            ROS_WARN("  Path %zu fallback failed: low-risk segment %zu optimizeSE2 returned empty",
+                     pi, si);
             fallback_ok = false;
             break;
           }
-          double min_seg_svsdf = svsdf_evaluator_.evaluateTrajectory(reopt, 0.05);
-          if (min_seg_svsdf < -opt_params_.safety_margin) {
+          ValidationReport fallback_seg_report = inspectTrajectory(reopt);
+          if (fallback_seg_report.min_svsdf < -opt_params_.safety_margin) {
+            ROS_WARN("  Path %zu fallback failed: upgraded segment %zu infeasible: %s",
+                     pi, si, formatValidation(fallback_seg_report).c_str());
             fallback_ok = false;
             break;
           }
@@ -338,13 +407,26 @@ private:
 
         if (fallback_ok) {
           full = optimizer_.stitch(segments, seg_trajs);
-          valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc);
+          valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc, &full_report);
+          if (!valid) {
+            ROS_WARN("  Path %zu fallback validation still failed: %s", pi,
+                     formatValidation(full_report).c_str());
+          }
         }
       }
 
       if (valid) {
-        ROS_INFO("  Path %zu accepted: min_svsdf=%.3f, vmax=%.3f, amax=%.3f",
-                 pi, min_svsdf, max_vel, max_acc);
+        ROS_INFO("  Path %zu accepted: %s", pi, formatValidation(full_report).c_str());
+        if (!full_report.collision_free) {
+          ROS_ERROR("  Path %zu accepted even though it penetrates obstacles "
+                    "(min_svsdf=%.3f). Current hard gate only rejects "
+                    "min_svsdf < -safety_margin (%.3f).",
+                    pi, full_report.min_svsdf, opt_params_.safety_margin);
+        } else if (!full_report.margin_ok) {
+          ROS_WARN("  Path %zu accepted but clearance is below desired safety_margin "
+                   "(min_svsdf=%.3f < %.3f).",
+                   pi, full_report.min_svsdf, opt_params_.safety_margin);
+        }
         candidates.push_back(full);
         all_segments.push_back(segments);
       } else {
