@@ -122,6 +122,9 @@ bool SE2SequenceGenerator::safeYaw(SE2State& state, double desired_yaw) {
 bool SE2SequenceGenerator::pushStateFromObstacle(SE2State& state,
                                                  double desired_yaw) {
   const double eps = map_->resolution();
+  const double radial_step = std::max(eps, 0.5 * disc_step_);
+  const int angular_samples = 32;
+  const int num_rings = std::max(4, max_push_);
   for (int attempt = 0; attempt < max_push_; ++attempt) {
     SE2State trial = state;
     if (safeYaw(trial, desired_yaw)) {
@@ -132,23 +135,29 @@ bool SE2SequenceGenerator::pushStateFromObstacle(SE2State& state,
     bool found_nearby_safe = false;
     SE2State best_nearby = state;
     double best_score = -kInf;
-    const double radius = (attempt + 1) * eps;
-    for (int k = 0; k < 24; ++k) {
-      const double theta = kTwoPi * static_cast<double>(k) / 24.0;
-      SE2State nearby(state.x + radius * std::cos(theta),
-                      state.y + radius * std::sin(theta),
-                      desired_yaw);
-      SE2State assigned = nearby;
-      if (!safeYaw(assigned, desired_yaw)) {
-        continue;
-      }
-      const double score = map_->getEsdf(nearby.x, nearby.y) +
-                           0.1 * static_cast<double>(
-                               checker_->safeYawIndices(nearby.x, nearby.y).size());
-      if (!found_nearby_safe || score > best_score) {
-        found_nearby_safe = true;
-        best_score = score;
-        best_nearby = assigned;
+    for (int ring = 1; ring <= num_rings; ++ring) {
+      const double radius = ring * radial_step;
+      for (int k = 0; k < angular_samples; ++k) {
+        const double theta = kTwoPi * static_cast<double>(k) /
+                             static_cast<double>(angular_samples);
+        SE2State nearby(state.x + radius * std::cos(theta),
+                        state.y + radius * std::sin(theta),
+                        desired_yaw);
+        SE2State assigned = nearby;
+        if (!safeYaw(assigned, desired_yaw)) {
+          continue;
+        }
+        const int safe_count = static_cast<int>(
+            checker_->safeYawIndices(nearby.x, nearby.y).size());
+        const double yaw_penalty = std::abs(normalizeAngle(assigned.yaw - desired_yaw));
+        const double score = 0.6 * map_->getEsdf(nearby.x, nearby.y) +
+                             0.15 * static_cast<double>(safe_count) -
+                             0.5 * radius - 0.1 * yaw_penalty;
+        if (!found_nearby_safe || score > best_score) {
+          found_nearby_safe = true;
+          best_score = score;
+          best_nearby = assigned;
+        }
       }
     }
     if (found_nearby_safe) {
@@ -245,6 +254,29 @@ bool SE2SequenceGenerator::segAdjustRecursive(const std::vector<SE2State>& seed,
   return true;
 }
 
+bool SE2SequenceGenerator::repairShortWindow(const std::vector<SE2State>& seed,
+                                             std::vector<SE2State>& repaired) {
+  if (seed.size() < 2) return false;
+  if (seed.size() > 8) return false;
+
+  repaired = seed;
+  for (size_t i = 1; i + 1 < repaired.size(); ++i) {
+    if (!pushStateFromObstacle(repaired[i], seed[i].yaw)) {
+      return false;
+    }
+  }
+
+  for (size_t i = 1; i + 1 < repaired.size(); ++i) {
+    SE2State assigned = repaired[i];
+    if (!safeYaw(assigned, seed[i].yaw)) {
+      return false;
+    }
+    repaired[i] = assigned;
+  }
+
+  return true;
+}
+
 std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
                                                            const SE2State& start,
                                                            const SE2State& goal) {
@@ -298,6 +330,14 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
 
     std::vector<SE2State> repaired;
     if (segAdjustRecursive(seed, 0, repaired)) {
+      for (size_t k = 1; k < repaired.size(); ++k) {
+        current.waypoints.push_back(repaired[k]);
+      }
+      i = next_safe_idx + 1;
+      continue;
+    }
+
+    if (repairShortWindow(seed, repaired)) {
       for (size_t k = 1; k < repaired.size(); ++k) {
         current.waypoints.push_back(repaired[k]);
       }

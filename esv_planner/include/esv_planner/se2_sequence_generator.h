@@ -42,6 +42,10 @@ private:
                           int depth,
                           std::vector<SE2State>& repaired);
 
+  // Fallback for short local failures that do not justify a full HIGH segment.
+  bool repairShortWindow(const std::vector<SE2State>& seed,
+                         std::vector<SE2State>& repaired);
+
   // Resample a straight sub-segment for recursive SegAdjust.
   std::vector<SE2State> buildLinearSegment(const SE2State& start,
                                            const SE2State& goal) const;
