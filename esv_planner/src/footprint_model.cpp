@@ -61,4 +61,34 @@ std::vector<Eigen::Vector2d> FootprintModel::rotatedVertices(double yaw) const {
   return result;
 }
 
+std::vector<Eigen::Vector2d> FootprintModel::sampleBoundary(double yaw, double step) const {
+  std::vector<Eigen::Vector2d> rotated = rotatedVertices(yaw);
+  std::vector<Eigen::Vector2d> samples;
+  if (rotated.empty()) return samples;
+  if (rotated.size() == 1) {
+    samples.push_back(rotated.front());
+    return samples;
+  }
+
+  const double spacing = std::max(1e-3, step);
+  for (size_t i = 0; i < rotated.size(); ++i) {
+    const Eigen::Vector2d& a = rotated[i];
+    const Eigen::Vector2d& b = rotated[(i + 1) % rotated.size()];
+    Eigen::Vector2d delta = b - a;
+    double len = delta.norm();
+    if (len < 1e-9) {
+      samples.push_back(a);
+      continue;
+    }
+
+    int n = std::max(2, static_cast<int>(std::ceil(len / spacing)) + 1);
+    for (int s = 0; s < n - 1; ++s) {
+      double r = static_cast<double>(s) / static_cast<double>(n - 1);
+      samples.push_back(a + r * delta);
+    }
+  }
+  samples.push_back(rotated.front());
+  return samples;
+}
+
 }  // namespace esv_planner

@@ -6,8 +6,8 @@ inscribed_radius: 0.1
 
 # Topology planner
 topology:
-  num_samples: 520
-  knn: 18
+  num_samples: 800
+  knn: 20
   max_paths: 14
 
 # SE(2) sequence generator
@@ -52,10 +52,10 @@ hybrid_astar:
 # Default start/goal
 start_pose:
   x: 1.0
-  y: 1.0
+  y: 8.5
   yaw: 0.0
 
 goal_pose:
-  x: 8.0
-  y: 8.0
-  yaw: 1.57
+  x: 8.5
+  y: 1.0
+  yaw: -1.57

@@ -168,15 +168,27 @@ struct Trajectory {
   }
 };
 
-// Candidate path from topology planner (sequence of 2D waypoints)
+struct TopoWaypoint {
+  Eigen::Vector2d pos = Eigen::Vector2d::Zero();
+  double yaw = 0.0;
+  bool has_yaw = false;
+
+  TopoWaypoint() = default;
+  explicit TopoWaypoint(const Eigen::Vector2d& pos_) : pos(pos_) {}
+  TopoWaypoint(double x, double y) : pos(x, y) {}
+  TopoWaypoint(const Eigen::Vector2d& pos_, double yaw_)
+      : pos(pos_), yaw(yaw_), has_yaw(true) {}
+};
+
+// Candidate path from topology planner
 struct TopoPath {
-  std::vector<Eigen::Vector2d> points;
+  std::vector<TopoWaypoint> waypoints;
   double length = 0.0;
 
   void computeLength() {
     length = 0.0;
-    for (size_t i = 1; i < points.size(); ++i) {
-      length += (points[i] - points[i - 1]).norm();
+    for (size_t i = 1; i < waypoints.size(); ++i) {
+      length += (waypoints[i].pos - waypoints[i - 1].pos).norm();
     }
   }
 };

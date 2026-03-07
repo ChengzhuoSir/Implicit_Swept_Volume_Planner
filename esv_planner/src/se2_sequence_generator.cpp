@@ -4,6 +4,41 @@
 
 namespace esv_planner {
 
+namespace {
+
+Eigen::Vector2d esdfAscentDirection(const GridMap& map,
+                                    const Eigen::Vector2d& world,
+                                    double eps) {
+  const double ex_p = map.getEsdf(world.x() + eps, world.y());
+  const double ex_n = map.getEsdf(world.x() - eps, world.y());
+  const double ey_p = map.getEsdf(world.x(), world.y() + eps);
+  const double ey_n = map.getEsdf(world.x(), world.y() - eps);
+  Eigen::Vector2d grad(ex_p - ex_n, ey_p - ey_n);
+  if (grad.norm() > 1e-9) {
+    return grad.normalized();
+  }
+
+  const double base = map.getEsdf(world.x(), world.y());
+  Eigen::Vector2d best = Eigen::Vector2d::Zero();
+  double best_gain = 0.0;
+  for (int k = 0; k < 16; ++k) {
+    const double theta = kTwoPi * static_cast<double>(k) / 16.0;
+    const Eigen::Vector2d dir(std::cos(theta), std::sin(theta));
+    for (double scale : {1.0, 2.0, 3.0}) {
+      const double value = map.getEsdf(world.x() + scale * eps * dir.x(),
+                                       world.y() + scale * eps * dir.y());
+      const double gain = value - base;
+      if (gain > best_gain) {
+        best_gain = gain;
+        best = dir;
+      }
+    }
+  }
+  return best;
+}
+
+}  // namespace
+
 SE2SequenceGenerator::SE2SequenceGenerator() {}
 
 void SE2SequenceGenerator::init(const GridMap& map, const CollisionChecker& checker,
@@ -18,28 +53,31 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
                                                             const SE2State& start,
                                                             const SE2State& goal) {
   std::vector<SE2State> states;
-  if (path.points.size() < 2) return states;
+  if (path.waypoints.size() < 2) return states;
 
   states.push_back(start);
 
-  for (size_t i = 1; i < path.points.size(); ++i) {
-    Eigen::Vector2d dir = path.points[i] - path.points[i - 1];
+  for (size_t i = 1; i < path.waypoints.size(); ++i) {
+    Eigen::Vector2d dir = path.waypoints[i].pos - path.waypoints[i - 1].pos;
     double seg_len = dir.norm();
     if (seg_len < 1e-9) continue;
 
     // Tangent yaw for this segment
     double tangent_yaw = std::atan2(dir.y(), dir.x());
+    if (path.waypoints[i].has_yaw) {
+      tangent_yaw = path.waypoints[i].yaw;
+    }
 
     int n_steps = std::max(1, static_cast<int>(std::ceil(seg_len / disc_step_)));
     for (int s = 1; s <= n_steps; ++s) {
       double t = static_cast<double>(s) / n_steps;
-      Eigen::Vector2d p = path.points[i - 1] + t * dir;
+      Eigen::Vector2d p = path.waypoints[i - 1].pos + t * dir;
 
       // Initialize yaw from tangent direction
       SE2State st(p.x(), p.y(), tangent_yaw);
 
       // For last point of last segment, blend toward goal yaw
-      if (i == path.points.size() - 1 && s == n_steps) {
+      if (i == path.waypoints.size() - 1 && s == n_steps) {
         st.yaw = goal.yaw;
       }
 
@@ -56,218 +94,243 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
 }
 
 bool SE2SequenceGenerator::safeYaw(SE2State& state, double desired_yaw) {
-  // Check if desired yaw is already safe
+  const int bins = checker_->numYawBins();
+  const auto wrap_bin = [bins](int bin) {
+    int wrapped = bin % bins;
+    return wrapped < 0 ? wrapped + bins : wrapped;
+  };
+
   int desired_bin = checker_->binFromYaw(desired_yaw);
   if (checker_->isYawSafe(state.x, state.y, desired_bin)) {
     state.yaw = checker_->yawFromBin(desired_bin);
     return true;
   }
 
-  // Find closest safe yaw bin
-  auto safe_bins = checker_->safeYawIndices(state.x, state.y);
-  if (safe_bins.empty()) return false;
-
-  int best_bin = safe_bins[0];
-  double best_diff = kInf;
-  for (int bin : safe_bins) {
-    double yaw = checker_->yawFromBin(bin);
-    double diff = std::abs(normalizeAngle(yaw - desired_yaw));
-    if (diff < best_diff) {
-      best_diff = diff;
-      best_bin = bin;
+  for (int offset = 1; offset <= bins / 2; ++offset) {
+    for (int sign : {-1, 1}) {
+      const int bin = wrap_bin(desired_bin + sign * offset);
+      if (checker_->isYawSafe(state.x, state.y, bin)) {
+        state.yaw = checker_->yawFromBin(bin);
+        return true;
+      }
     }
   }
-  state.yaw = checker_->yawFromBin(best_bin);
-  return true;
+
+  return false;
 }
 
-bool SE2SequenceGenerator::segAdjust(std::vector<SE2State>& segment) {
-  // SegAdjust (paper Section IV-B):
-  // Push colliding states away from obstacles using ESDF gradient,
-  // then re-assign yaw. If still colliding, subdivide the segment.
-
+bool SE2SequenceGenerator::pushStateFromObstacle(SE2State& state,
+                                                 double desired_yaw) {
+  const double eps = map_->resolution();
   for (int attempt = 0; attempt < max_push_; ++attempt) {
-    bool all_safe = true;
-
-    for (auto& st : segment) {
-      if (checker_->isFree(st)) continue;
-      all_safe = false;
-
-      // Push position away from obstacle using ESDF gradient
-      double esdf_val = map_->getEsdf(st.x, st.y);
-      double eps = map_->resolution();
-
-      double dx = map_->getEsdf(st.x + eps, st.y) - map_->getEsdf(st.x - eps, st.y);
-      double dy = map_->getEsdf(st.x, st.y + eps) - map_->getEsdf(st.x, st.y - eps);
-      double grad_norm = std::sqrt(dx * dx + dy * dy);
-
-      if (grad_norm > 1e-9) {
-        double push_dist = std::max(eps, std::abs(esdf_val) + eps);
-        st.x += push_dist * dx / grad_norm;
-        st.y += push_dist * dy / grad_norm;
-      }
-
-      // Re-assign yaw after position change
-      safeYaw(st, st.yaw);
+    SE2State trial = state;
+    if (safeYaw(trial, desired_yaw)) {
+      state = trial;
+      return true;
     }
 
-    if (all_safe) return true;
-  }
-
-  // If still not all safe, try subdividing: insert midpoints between colliding pairs
-  std::vector<SE2State> refined;
-  refined.push_back(segment.front());
-
-  for (size_t i = 1; i < segment.size(); ++i) {
-    // Check if midpoint helps
-    SE2State mid;
-    mid.x = 0.5 * (segment[i - 1].x + segment[i].x);
-    mid.y = 0.5 * (segment[i - 1].y + segment[i].y);
-    mid.yaw = segment[i - 1].yaw;  // initial guess
-
-    // Push midpoint if needed
-    double esdf_val = map_->getEsdf(mid.x, mid.y);
-    if (esdf_val < map_->resolution()) {
-      double eps = map_->resolution();
-      double dx = map_->getEsdf(mid.x + eps, mid.y) - map_->getEsdf(mid.x - eps, mid.y);
-      double dy = map_->getEsdf(mid.x, mid.y + eps) - map_->getEsdf(mid.x, mid.y - eps);
-      double grad_norm = std::sqrt(dx * dx + dy * dy);
-      if (grad_norm > 1e-9) {
-        double push_dist = std::max(eps, std::abs(esdf_val) + eps);
-        mid.x += push_dist * dx / grad_norm;
-        mid.y += push_dist * dy / grad_norm;
+    bool found_nearby_safe = false;
+    SE2State best_nearby = state;
+    double best_score = -kInf;
+    const double radius = (attempt + 1) * eps;
+    for (int k = 0; k < 24; ++k) {
+      const double theta = kTwoPi * static_cast<double>(k) / 24.0;
+      SE2State nearby(state.x + radius * std::cos(theta),
+                      state.y + radius * std::sin(theta),
+                      desired_yaw);
+      SE2State assigned = nearby;
+      if (!safeYaw(assigned, desired_yaw)) {
+        continue;
+      }
+      const double score = map_->getEsdf(nearby.x, nearby.y) +
+                           0.1 * static_cast<double>(
+                               checker_->safeYawIndices(nearby.x, nearby.y).size());
+      if (!found_nearby_safe || score > best_score) {
+        found_nearby_safe = true;
+        best_score = score;
+        best_nearby = assigned;
       }
     }
-
-    safeYaw(mid, mid.yaw);
-
-    if (!checker_->isFree(segment[i - 1]) || !checker_->isFree(segment[i])) {
-      refined.push_back(mid);
+    if (found_nearby_safe) {
+      state = best_nearby;
+      return true;
     }
-    refined.push_back(segment[i]);
+
+    const Eigen::Vector2d dir = esdfAscentDirection(*map_, state.position(), eps);
+    if (dir.norm() < 1e-9) {
+      return false;
+    }
+
+    const double esdf = map_->getEsdf(state.x, state.y);
+    const double push = std::min(std::max(eps, std::abs(std::min(0.0, esdf)) + eps),
+                                 4.0 * eps);
+    state.x += push * dir.x();
+    state.y += push * dir.y();
+    state.yaw = desired_yaw;
   }
 
-  segment = refined;
+  return safeYaw(state, desired_yaw);
+}
 
-  // One more round of push
-  for (auto& st : segment) {
-    if (!checker_->isFree(st)) {
-      double eps = map_->resolution();
-      double dx = map_->getEsdf(st.x + eps, st.y) - map_->getEsdf(st.x - eps, st.y);
-      double dy = map_->getEsdf(st.x, st.y + eps) - map_->getEsdf(st.x, st.y - eps);
-      double grad_norm = std::sqrt(dx * dx + dy * dy);
-      if (grad_norm > 1e-9) {
-        double push_dist = std::max(eps, std::abs(map_->getEsdf(st.x, st.y)) + eps);
-        st.x += push_dist * dx / grad_norm;
-        st.y += push_dist * dy / grad_norm;
-      }
-      safeYaw(st, st.yaw);
-    }
+std::vector<SE2State> SE2SequenceGenerator::buildLinearSegment(
+    const SE2State& start,
+    const SE2State& goal) const {
+  std::vector<SE2State> segment;
+  segment.push_back(start);
+
+  const Eigen::Vector2d delta = goal.position() - start.position();
+  const double len = delta.norm();
+  if (len < 1e-9) {
+    segment.push_back(goal);
+    return segment;
   }
 
+  const double tangent_yaw = std::atan2(delta.y(), delta.x());
+  const int n_steps = std::max(1, static_cast<int>(std::ceil(len / disc_step_)));
+  for (int s = 1; s < n_steps; ++s) {
+    const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+    const Eigen::Vector2d p = start.position() + t * delta;
+    segment.emplace_back(p.x(), p.y(), tangent_yaw);
+  }
+
+  segment.push_back(goal);
+  return segment;
+}
+
+bool SE2SequenceGenerator::segAdjustRecursive(const std::vector<SE2State>& seed,
+                                              int depth,
+                                              std::vector<SE2State>& repaired) {
+  if (seed.size() < 2) return false;
+  const int max_depth = std::max(8, max_push_ * 3);
+
+  std::vector<SE2State> trial = seed;
+  size_t fail_idx = trial.size();
+  for (size_t i = 1; i + 1 < trial.size(); ++i) {
+    SE2State assigned = trial[i];
+    if (!safeYaw(assigned, seed[i].yaw)) {
+      fail_idx = i;
+      break;
+    }
+    trial[i] = assigned;
+  }
+
+  if (fail_idx == trial.size()) {
+    repaired = trial;
+    return true;
+  }
+
+  if (depth >= max_depth || trial.size() < 3) {
+    return false;
+  }
+
+  SE2State pivot = seed[fail_idx];
+  if (!pushStateFromObstacle(pivot, seed[fail_idx].yaw)) {
+    return false;
+  }
+
+  const auto left_seed = buildLinearSegment(trial.front(), pivot);
+  const auto right_seed = buildLinearSegment(pivot, trial.back());
+
+  std::vector<SE2State> left_repaired;
+  std::vector<SE2State> right_repaired;
+  if (!segAdjustRecursive(left_seed, depth + 1, left_repaired)) {
+    return false;
+  }
+  if (!segAdjustRecursive(right_seed, depth + 1, right_repaired)) {
+    return false;
+  }
+
+  repaired = left_repaired;
+  repaired.insert(repaired.end(), right_repaired.begin() + 1, right_repaired.end());
   return true;
-}
-
-RiskLevel SE2SequenceGenerator::classifyRisk(const std::vector<SE2State>& segment) {
-  // A segment is HIGH risk if any state has limited safe yaw options
-  // (i.e., the robot's orientation is constrained by nearby obstacles)
-  int num_yaw_bins = checker_->numYawBins();
-  int constrained_count = 0;
-
-  for (const auto& st : segment) {
-    auto safe = checker_->safeYawIndices(st.x, st.y);
-    // If fewer than half the yaw bins are safe, it's constrained
-    if (static_cast<int>(safe.size()) < num_yaw_bins / 2) {
-      constrained_count++;
-    }
-  }
-
-  // If more than 30% of states are constrained, mark as HIGH risk
-  double ratio = static_cast<double>(constrained_count) / segment.size();
-  return (ratio > 0.3) ? RiskLevel::HIGH : RiskLevel::LOW;
-}
-
-std::vector<MotionSegment> SE2SequenceGenerator::segmentByRisk(
-    const std::vector<SE2State>& states) {
-  std::vector<MotionSegment> segments;
-  if (states.empty()) return segments;
-
-  // Classify each state
-  int num_yaw_bins = checker_->numYawBins();
-  std::vector<bool> is_constrained(states.size(), false);
-
-  for (size_t i = 0; i < states.size(); ++i) {
-    auto safe = checker_->safeYawIndices(states[i].x, states[i].y);
-    is_constrained[i] = (static_cast<int>(safe.size()) < num_yaw_bins / 2);
-  }
-
-  // Group contiguous states with same risk level
-  MotionSegment current;
-  bool prev_constrained = is_constrained[0];
-  current.waypoints.push_back(states[0]);
-
-  for (size_t i = 1; i < states.size(); ++i) {
-    if (is_constrained[i] != prev_constrained) {
-      // Finalize current segment
-      current.risk = prev_constrained ? RiskLevel::HIGH : RiskLevel::LOW;
-      segments.push_back(current);
-
-      // Start new segment with overlap point
-      current = MotionSegment();
-      current.waypoints.push_back(states[i - 1]);
-    }
-    current.waypoints.push_back(states[i]);
-    prev_constrained = is_constrained[i];
-  }
-
-  // Finalize last segment
-  current.risk = prev_constrained ? RiskLevel::HIGH : RiskLevel::LOW;
-  if (!current.waypoints.empty()) {
-    segments.push_back(current);
-  }
-
-  // Merge very short segments (< 3 waypoints) into neighbors
-  std::vector<MotionSegment> merged;
-  for (size_t i = 0; i < segments.size(); ++i) {
-    if (segments[i].waypoints.size() < 3 && !merged.empty()) {
-      // Append to previous segment
-      for (size_t j = 1; j < segments[i].waypoints.size(); ++j) {
-        merged.back().waypoints.push_back(segments[i].waypoints[j]);
-      }
-      // Upgrade risk if needed
-      if (segments[i].risk == RiskLevel::HIGH) {
-        merged.back().risk = RiskLevel::HIGH;
-      }
-    } else {
-      merged.push_back(segments[i]);
-    }
-  }
-
-  return merged;
 }
 
 std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
                                                            const SE2State& start,
                                                            const SE2State& goal) {
-  if (path.points.size() < 2) return {};
+  if (path.waypoints.size() < 2) return {};
 
   // Step 1: Discretize path into SE2 states with tangent yaw
   auto states = discretizePath(path, start, goal);
   if (states.size() < 2) return {};
 
-  // Step 2: Assign safe yaw to each state (SafeYaw)
-  for (size_t i = 1; i + 1 < states.size(); ++i) {
-    safeYaw(states[i], states[i].yaw);
+  std::vector<MotionSegment> segments;
+  MotionSegment current;
+  current.risk = RiskLevel::LOW;
+  current.waypoints.push_back(states.front());
+
+  size_t i = 1;
+  while (i + 1 < states.size()) {
+    SE2State assigned = states[i];
+    if (safeYaw(assigned, states[i].yaw)) {
+      current.waypoints.push_back(assigned);
+      ++i;
+      continue;
+    }
+
+    size_t next_safe_idx = i + 1;
+    SE2State next_safe = states[next_safe_idx];
+    bool found_next_anchor = false;
+    for (; next_safe_idx < states.size(); ++next_safe_idx) {
+      next_safe = states[next_safe_idx];
+      if (next_safe_idx == states.size() - 1) {
+        found_next_anchor = true;
+        break;
+      }
+      if (safeYaw(next_safe, states[next_safe_idx].yaw)) {
+        found_next_anchor = true;
+        break;
+      }
+    }
+
+    if (!found_next_anchor) {
+      next_safe_idx = states.size() - 1;
+      next_safe = states.back();
+    }
+
+    std::vector<SE2State> seed;
+    seed.reserve(next_safe_idx - i + 2);
+    seed.push_back(current.waypoints.back());
+    for (size_t k = i; k <= next_safe_idx; ++k) {
+      seed.push_back(states[k]);
+    }
+    seed.back() = next_safe;
+
+    std::vector<SE2State> repaired;
+    if (segAdjustRecursive(seed, 0, repaired)) {
+      for (size_t k = 1; k < repaired.size(); ++k) {
+        current.waypoints.push_back(repaired[k]);
+      }
+      i = next_safe_idx + 1;
+      continue;
+    }
+
+    if (current.waypoints.size() > 1) {
+      segments.push_back(current);
+    }
+
+    MotionSegment high;
+    high.risk = RiskLevel::HIGH;
+    high.waypoints = seed;
+    segments.push_back(high);
+
+    current = MotionSegment();
+    current.risk = RiskLevel::LOW;
+    current.waypoints.push_back(seed.back());
+    i = next_safe_idx + 1;
   }
 
-  // Step 3: Segment by risk level
-  auto segments = segmentByRisk(states);
+  if (current.waypoints.empty()) {
+    current.waypoints.push_back(states.front());
+  }
+  if ((current.waypoints.back().position() - states.back().position()).norm() > 1e-6) {
+    current.waypoints.push_back(states.back());
+  } else {
+    current.waypoints.back() = states.back();
+  }
 
-  // Step 4: SegAdjust for high-risk segments
-  for (auto& seg : segments) {
-    if (seg.risk == RiskLevel::HIGH) {
-      segAdjust(seg.waypoints);
-    }
+  if (current.waypoints.size() >= 2) {
+    segments.push_back(current);
   }
 
   return segments;

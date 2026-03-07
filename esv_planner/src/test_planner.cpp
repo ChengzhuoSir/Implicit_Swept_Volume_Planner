@@ -276,7 +276,7 @@ int main(int argc, char** argv)
 
   for (size_t i = 0; i < paths.size(); ++i) {
     std::cout << "  path[" << i << "]: length=" << paths[i].length
-              << "  waypoints=" << paths[i].points.size() << "\n";
+              << "  waypoints=" << paths[i].waypoints.size() << "\n";
   }
 
   // --- Stage 2 + 3: SE(2) sequence generation + trajectory optimization ----

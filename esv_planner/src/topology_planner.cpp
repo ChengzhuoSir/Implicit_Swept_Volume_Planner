@@ -11,6 +11,84 @@
 
 namespace esv_planner {
 
+namespace {
+
+const Eigen::Vector2d& waypointPos(const TopoWaypoint& wp) {
+  return wp.pos;
+}
+
+void assignTangentYaw(std::vector<TopoWaypoint>& waypoints) {
+  if (waypoints.empty()) return;
+  if (waypoints.size() == 1) {
+    waypoints.front().yaw = 0.0;
+    waypoints.front().has_yaw = true;
+    return;
+  }
+
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    Eigen::Vector2d dir = (i == 0)
+        ? (waypoints[1].pos - waypoints[0].pos)
+        : (waypoints[i].pos - waypoints[i - 1].pos);
+    if (dir.norm() < 1e-9) {
+      waypoints[i].yaw = (i > 0) ? waypoints[i - 1].yaw : 0.0;
+    } else {
+      waypoints[i].yaw = std::atan2(dir.y(), dir.x());
+    }
+    waypoints[i].has_yaw = true;
+  }
+}
+
+double interpolateWaypointYaw(const TopoWaypoint& a, const TopoWaypoint& b, double t) {
+  double yaw_a = a.has_yaw ? a.yaw : std::atan2((b.pos - a.pos).y(), (b.pos - a.pos).x());
+  double yaw_b = b.has_yaw ? b.yaw : yaw_a;
+  return normalizeAngle(yaw_a + normalizeAngle(yaw_b - yaw_a) * t);
+}
+
+TopoWaypoint withIncomingYaw(const TopoWaypoint& from, const TopoWaypoint& to) {
+  TopoWaypoint out = to;
+  Eigen::Vector2d dir = out.pos - from.pos;
+  if (dir.norm() < 1e-9) {
+    out.yaw = from.has_yaw ? from.yaw : 0.0;
+  } else {
+    out.yaw = std::atan2(dir.y(), dir.x());
+  }
+  out.has_yaw = true;
+  return out;
+}
+
+Eigen::Vector2d esdfAscentDirection(const GridMap& map,
+                                    const Eigen::Vector2d& world,
+                                    double eps) {
+  const double ex_p = map.getEsdf(world.x() + eps, world.y());
+  const double ex_n = map.getEsdf(world.x() - eps, world.y());
+  const double ey_p = map.getEsdf(world.x(), world.y() + eps);
+  const double ey_n = map.getEsdf(world.x(), world.y() - eps);
+  Eigen::Vector2d grad(ex_p - ex_n, ey_p - ey_n);
+  if (grad.norm() > 1e-9) {
+    return grad.normalized();
+  }
+
+  const double base = map.getEsdf(world.x(), world.y());
+  Eigen::Vector2d best = Eigen::Vector2d::Zero();
+  double best_gain = 0.0;
+  for (int k = 0; k < 16; ++k) {
+    const double theta = kTwoPi * static_cast<double>(k) / 16.0;
+    const Eigen::Vector2d dir(std::cos(theta), std::sin(theta));
+    for (double scale : {1.0, 2.0, 3.0}) {
+      const double value = map.getEsdf(world.x() + scale * eps * dir.x(),
+                                       world.y() + scale * eps * dir.y());
+      const double gain = value - base;
+      if (gain > best_gain) {
+        best_gain = gain;
+        best = dir;
+      }
+    }
+  }
+  return best;
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Halton sequence helper (base 2 and base 3 for 2-D quasi-random sampling)
 // ---------------------------------------------------------------------------
@@ -149,8 +227,9 @@ TopoPath TopologyPlanner::dijkstra(int src, int dst,
   std::reverse(path_indices.begin(), path_indices.end());
 
   for (int idx : path_indices) {
-    result.points.push_back(nodes_[idx]);
+    result.waypoints.emplace_back(nodes_[idx]);
   }
+  assignTangentYaw(result.waypoints);
   result.computeLength();
   return result;
 }
@@ -245,19 +324,7 @@ std::vector<TopoPath> TopologyPlanner::searchPaths() {
   const int n = static_cast<int>(nodes_.size());
   const int src = 0;
   const int dst = 1;
-
-  struct CandidatePath {
-    std::vector<int> indices;
-    double cost = kInf;
-    bool operator>(const CandidatePath& o) const {
-      if (cost != o.cost) return cost > o.cost;
-      return indices.size() > o.indices.size();
-    }
-  };
-
-  std::vector<CandidatePath> A;  // accepted K-shortest index paths
-  std::priority_queue<CandidatePath, std::vector<CandidatePath>,
-                      std::greater<CandidatePath>> B;  // candidates
+  std::vector<double> node_penalty(static_cast<size_t>(n), 0.0);
   std::unordered_set<std::string> seen;
 
   auto keyOf = [](const std::vector<int>& p) {
@@ -270,91 +337,44 @@ std::vector<TopoPath> TopologyPlanner::searchPaths() {
     return k;
   };
 
-  auto pushCandidate = [&](const std::vector<int>& idx_path) {
-    if (idx_path.size() < 2) return;
-    double c = pathCostFromAdj(idx_path, adjacency_);
-    if (!std::isfinite(c)) return;
-    std::string key = keyOf(idx_path);
-    if (!seen.insert(key).second) return;
-    B.push(CandidatePath{idx_path, c});
-  };
-
-  // 1) First shortest path
-  {
-    const std::set<std::pair<int, int>> blocked_edges;
-    const std::unordered_set<int> blocked_nodes;
-    auto d = dijkstraFull(src, dst, n, adjacency_, blocked_edges, blocked_nodes);
-    if (d.first >= kInf) return result;
-    std::vector<int> shortest = reconstructIndices(d.second, src, dst);
-    if (shortest.size() < 2) return result;
-    A.push_back(CandidatePath{shortest, d.first});
-  }
-
-  // 2) Yen's algorithm
-  for (int k = 1; k < max_paths_; ++k) {
-    const std::vector<int>& prev_path = A[k - 1].indices;
-    if (prev_path.size() < 2) break;
-
-    for (size_t i = 0; i + 1 < prev_path.size(); ++i) {
-      int spur_node = prev_path[i];
-      std::vector<int> root_path(prev_path.begin(), prev_path.begin() + i + 1);
-
-      std::set<std::pair<int, int>> blocked_edges;
-      std::unordered_set<int> blocked_nodes;
-
-      // Block edges that would reproduce previous paths sharing this root.
-      for (const auto& accepted : A) {
-        if (accepted.indices.size() <= i) continue;
-        bool same_root = true;
-        for (size_t r = 0; r <= i; ++r) {
-          if (accepted.indices[r] != root_path[r]) {
-            same_root = false;
-            break;
-          }
-        }
-        if (same_root && i + 1 < accepted.indices.size()) {
-          blocked_edges.insert({accepted.indices[i], accepted.indices[i + 1]});
+  auto indicesFromPath = [&](const TopoPath& path) {
+    std::vector<int> indices;
+    indices.reserve(path.waypoints.size());
+    for (const auto& wp : path.waypoints) {
+      int best_idx = -1;
+      double best_dist = kInf;
+      for (int ni = 0; ni < n; ++ni) {
+        double dist = (nodes_[ni] - wp.pos).norm();
+        if (dist < best_dist) {
+          best_dist = dist;
+          best_idx = ni;
         }
       }
-
-      // Block root nodes (except spur node) to avoid loops.
-      for (size_t r = 0; r + 1 < root_path.size(); ++r) {
-        blocked_nodes.insert(root_path[r]);
-      }
-
-      auto spur = dijkstraFull(spur_node, dst, n, adjacency_, blocked_edges, blocked_nodes);
-      if (spur.first >= kInf) continue;
-
-      std::vector<int> spur_path = reconstructIndices(spur.second, spur_node, dst);
-      if (spur_path.size() < 2) continue;
-
-      std::vector<int> total = root_path;
-      total.insert(total.end(), spur_path.begin() + 1, spur_path.end());
-      pushCandidate(total);
-    }
-
-    if (B.empty()) break;
-    A.push_back(B.top());
-    B.pop();
-  }
-
-  // 3) Convert to geometric paths and keep topologically distinct ones.
-  for (const auto& cand : A) {
-    TopoPath path;
-    path.points.reserve(cand.indices.size());
-    for (int idx : cand.indices) {
-      if (idx < 0 || idx >= n) {
-        path.points.clear();
+      if (best_idx >= 0 && best_dist < 1e-6) {
+        indices.push_back(best_idx);
+      } else {
+        indices.clear();
         break;
       }
-      path.points.push_back(nodes_[idx]);
     }
-    if (path.points.size() < 2) continue;
-    path.computeLength();
-    if (isTopologicallyDistinct(path, result)) {
+    return indices;
+  };
+
+  for (int iter = 0; iter < max_paths_ * 6; ++iter) {
+    TopoPath path = dijkstra(src, dst, node_penalty);
+    if (path.waypoints.size() < 2) break;
+
+    std::vector<int> indices = indicesFromPath(path);
+    if (indices.size() < 2) break;
+
+    if (seen.insert(keyOf(indices)).second) {
       result.push_back(path);
+      if (static_cast<int>(result.size()) >= max_paths_) break;
     }
-    if (static_cast<int>(result.size()) >= max_paths_) break;
+
+    for (size_t i = 1; i + 1 < indices.size(); ++i) {
+      node_penalty[indices[i]] += std::max(0.5, path.length * 0.1);
+    }
   }
 
   return result;
@@ -418,54 +438,81 @@ static double findCollisionT(const Eigen::Vector2d& a, const Eigen::Vector2d& b,
 // ---------------------------------------------------------------------------
 // pushPointFromObstacle  --  ESDF gradient ascent until safe
 // ---------------------------------------------------------------------------
-bool TopologyPlanner::pushPointFromObstacle(Eigen::Vector2d& pt,
+bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
                                              double safe_dist) const {
-  double esdf = map_->getEsdf(pt.x(), pt.y());
-  if (esdf >= safe_dist) return true;
+  const auto boundary = checker_->footprint().sampleBoundary(wp.yaw, map_->resolution() * 0.5);
+  if (boundary.empty()) return false;
 
   double eps = map_->resolution();
-  for (int attempt = 0; attempt < 20; ++attempt) {
-    double ex_p = map_->getEsdf(pt.x() + eps, pt.y());
-    double ex_n = map_->getEsdf(pt.x() - eps, pt.y());
-    double ey_p = map_->getEsdf(pt.x(), pt.y() + eps);
-    double ey_n = map_->getEsdf(pt.x(), pt.y() - eps);
-    double dx = ex_p - ex_n;
-    double dy = ey_p - ey_n;
-    double grad_norm = std::sqrt(dx * dx + dy * dy);
+  for (int attempt = 0; attempt < 24; ++attempt) {
+    double min_dist = kInf;
+    Eigen::Vector2d worst_world = wp.pos;
 
+    for (const auto& sample : boundary) {
+      Eigen::Vector2d world = wp.pos + sample;
+      double dist = map_->getEsdf(world.x(), world.y());
+      if (dist < min_dist) {
+        min_dist = dist;
+        worst_world = world;
+      }
+    }
+
+    if (min_dist >= safe_dist && checker_->isFree(SE2State(wp.pos.x(), wp.pos.y(), wp.yaw))) {
+      wp.has_yaw = true;
+      return true;
+    }
+
+    Eigen::Vector2d grad = esdfAscentDirection(*map_, worst_world, eps);
+    double grad_norm = grad.norm();
+    if (grad_norm < 1e-9) {
+      grad = esdfAscentDirection(*map_, wp.pos, eps);
+      grad_norm = grad.norm();
+    }
     if (grad_norm < 1e-9) return false;
 
-    // Step size: remaining distance to safe boundary, clamped
-    double deficit = safe_dist - esdf;
-    double push = std::min(std::max(eps, deficit), 3.0 * eps);
-    pt.x() += push * dx / grad_norm;
-    pt.y() += push * dy / grad_norm;
-
-    esdf = map_->getEsdf(pt.x(), pt.y());
-    if (esdf >= safe_dist) return true;
+    double deficit = safe_dist - min_dist;
+    double push = std::min(std::max(eps, deficit + eps), 4.0 * eps);
+    wp.pos += push * grad / grad_norm;
+    wp.has_yaw = true;
   }
-  return esdf > 0.0;
+
+  return checker_->isFree(SE2State(wp.pos.x(), wp.pos.y(), wp.yaw));
+}
+
+bool TopologyPlanner::configurationLineFree(const TopoWaypoint& a, const TopoWaypoint& b) const {
+  Eigen::Vector2d delta = b.pos - a.pos;
+  double dist = delta.norm();
+  int n_steps = std::max(2, static_cast<int>(std::ceil(dist / (map_->resolution() * 0.5))) + 1);
+  double yaw = b.has_yaw ? b.yaw : std::atan2(delta.y(), delta.x());
+  for (int i = 0; i < n_steps; ++i) {
+    double t = static_cast<double>(i) / static_cast<double>(n_steps - 1);
+    Eigen::Vector2d p = a.pos + t * delta;
+    if (!checker_->isFree(SE2State(p.x(), p.y(), yaw))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // discretizePath  --  resample a path at uniform spacing
 // ---------------------------------------------------------------------------
-static std::vector<Eigen::Vector2d> discretizePath(
-    const std::vector<Eigen::Vector2d>& pts, double resolution) {
+static std::vector<TopoWaypoint> discretizePath(
+    const std::vector<TopoWaypoint>& pts, double resolution) {
   if (pts.size() <= 1) return pts;
 
-  std::vector<Eigen::Vector2d> out;
+  std::vector<TopoWaypoint> out;
   out.push_back(pts.front());
 
   double accum = 0.0;
   for (size_t i = 1; i < pts.size(); ++i) {
-    Eigen::Vector2d dir = pts[i] - pts[i - 1];
+    Eigen::Vector2d dir = pts[i].pos - pts[i - 1].pos;
     double seg_len = dir.norm();
     if (seg_len < 1e-12) continue;
     Eigen::Vector2d unit = dir / seg_len;
 
     double remaining = seg_len;
-    Eigen::Vector2d cursor = pts[i - 1];
+    Eigen::Vector2d cursor = pts[i - 1].pos;
 
     // If there is leftover from the previous segment, consume it first
     if (accum > 0.0) {
@@ -473,7 +520,7 @@ static std::vector<Eigen::Vector2d> discretizePath(
       if (needed <= remaining) {
         cursor = cursor + needed * unit;
         remaining -= needed;
-        out.push_back(cursor);
+        out.emplace_back(cursor);
         accum = 0.0;
       } else {
         accum += remaining;
@@ -484,15 +531,16 @@ static std::vector<Eigen::Vector2d> discretizePath(
     while (remaining >= resolution) {
       cursor = cursor + resolution * unit;
       remaining -= resolution;
-      out.push_back(cursor);
+      out.emplace_back(cursor);
     }
     accum = remaining;
   }
 
   // Always include the last point
-  if ((out.back() - pts.back()).norm() > 1e-9) {
+  if ((out.back().pos - pts.back().pos).norm() > 1e-9) {
     out.push_back(pts.back());
   }
+  assignTangentYaw(out);
   return out;
 }
 
@@ -512,82 +560,123 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
   double res = map_->resolution();
 
   for (auto& path : paths) {
-    if (path.points.size() <= 2) continue;
+    if (path.waypoints.size() <= 2) continue;
 
-    // Step 1: discretize at map resolution
-    path.points = discretizePath(path.points, res);
-
-    // Iterate shortcutting until convergence
-    bool changed = true;
-    int max_iters = 20;
-    for (int iter = 0; iter < max_iters && changed; ++iter) {
-      changed = false;
-
-      std::vector<Eigen::Vector2d> result;
-      result.push_back(path.points.front());
-
-      size_t i = 0;
-      while (i < path.points.size() - 1) {
-        // Step 2: try to find the farthest visible point from p_i
-        bool shortcut_found = false;
-        for (size_t j = path.points.size() - 1; j > i + 1; --j) {
-          if (lineCollisionFree(path.points[i], path.points[j])) {
-            // Step 3: visible -- shortcut, skip intermediate points
-            result.push_back(path.points[j]);
-            i = j;
-            shortcut_found = true;
-            changed = true;
-            break;
-          } else {
-            // Step 4: find collision point on line p_i -> p_j
-            double t_col = findCollisionT(path.points[i], path.points[j],
-                                           *map_, safe_dist);
-            if (t_col < 0.0) continue;  // shouldn't happen, but guard
-
-            Eigen::Vector2d p_c = path.points[i] +
-                                  t_col * (path.points[j] - path.points[i]);
-
-            // Step 5: push p_c away from obstacle
-            Eigen::Vector2d p_c_pushed = p_c;
-            bool pushed = pushPointFromObstacle(p_c_pushed, safe_dist);
-            if (!pushed) continue;
-
-            // Step 6: verify both sub-segments are collision-free
-            if (lineCollisionFree(path.points[i], p_c_pushed) &&
-                lineCollisionFree(p_c_pushed, path.points[j])) {
-              result.push_back(p_c_pushed);
-              result.push_back(path.points[j]);
-              i = j;
-              shortcut_found = true;
-              changed = true;
-              break;
-            }
-            // If the pushed shortcut doesn't work for this j, try smaller j
-          }
+    std::vector<TopoWaypoint> discrete = path.waypoints;
+    assignTangentYaw(discrete);
+    for (size_t k = 1; k + 1 < discrete.size(); ++k) {
+      TopoWaypoint adjusted = withIncomingYaw(discrete[k - 1], discrete[k]);
+      double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
+      if (esdf < safe_dist || !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
+        if (pushPointFromObstacle(adjusted, safe_dist)) {
+          discrete[k] = withIncomingYaw(discrete[k - 1], adjusted);
         }
+      }
+    }
+    assignTangentYaw(discrete);
 
-        if (!shortcut_found) {
-          // No shortcut from p_i -- advance one step
-          ++i;
-          if (i < path.points.size()) {
-            result.push_back(path.points[i]);
-          }
+    std::vector<TopoWaypoint> result;
+    result.push_back(discrete.front());
+
+    size_t i = 0;
+    int inserted_pushes = 0;
+    const int max_inserted_pushes = static_cast<int>(discrete.size()) * 2;
+
+    while (i + 1 < discrete.size()) {
+      const TopoWaypoint anchor = result.back();
+
+      size_t best_j = i + 1;
+      bool found_long_shortcut = false;
+      for (size_t j = discrete.size() - 1; j > i + 1; --j) {
+        TopoWaypoint candidate = withIncomingYaw(anchor, discrete[j]);
+        if (configurationLineFree(anchor, candidate)) {
+          best_j = j;
+          found_long_shortcut = true;
+          break;
         }
       }
 
-      path.points = result;
+      if (found_long_shortcut) {
+        result.push_back(withIncomingYaw(anchor, discrete[best_j]));
+        i = best_j;
+        continue;
+      }
+
+      const TopoWaypoint next = withIncomingYaw(anchor, discrete[i + 1]);
+      if (configurationLineFree(anchor, next)) {
+        result.push_back(next);
+        i += 1;
+        continue;
+      }
+
+      if (inserted_pushes >= max_inserted_pushes) {
+        result.push_back(next);
+        i += 1;
+        continue;
+      }
+
+      const size_t target_j = std::min(discrete.size() - 1, i + 3);
+      TopoWaypoint target = withIncomingYaw(anchor, discrete[target_j]);
+      double t_col = findCollisionT(anchor.pos, target.pos, *map_, safe_dist);
+      if (t_col < 0.0) {
+        t_col = 0.5;
+      }
+
+      TopoWaypoint pushed_wp(anchor.pos + t_col * (target.pos - anchor.pos));
+      pushed_wp = withIncomingYaw(anchor, pushed_wp);
+      if (pushPointFromObstacle(pushed_wp, safe_dist) &&
+          (pushed_wp = withIncomingYaw(anchor, pushed_wp), true) &&
+          configurationLineFree(anchor, pushed_wp) &&
+          (pushed_wp.pos - anchor.pos).norm() > res * 0.75) {
+        result.push_back(pushed_wp);
+        ++inserted_pushes;
+        continue;
+      }
+
+      result.push_back(next);
+      i += 1;
     }
 
-    // Final safety pass: push any waypoint that is too close to obstacles
-    for (size_t i = 1; i + 1 < path.points.size(); ++i) {
-      double esdf = map_->getEsdf(path.points[i].x(), path.points[i].y());
-      if (esdf < safe_dist) {
-        pushPointFromObstacle(path.points[i], safe_dist);
+    if ((result.back().pos - discrete.back().pos).norm() > 1e-6) {
+      result.push_back(withIncomingYaw(result.back(), discrete.back()));
+    }
+
+    for (size_t k = 1; k + 1 < result.size(); ++k) {
+      TopoWaypoint adjusted = withIncomingYaw(result[k - 1], result[k]);
+      double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
+      if (esdf < safe_dist || !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
+        if (pushPointFromObstacle(adjusted, safe_dist)) {
+          result[k] = withIncomingYaw(result[k - 1], adjusted);
+        }
       }
     }
+    assignTangentYaw(result);
 
+    // Final pruning with the segment-yaw semantics used downstream.
+    for (size_t k = 1; k + 1 < result.size();) {
+      TopoWaypoint merged = withIncomingYaw(result[k - 1], result[k + 1]);
+      if (configurationLineFree(result[k - 1], merged)) {
+        result.erase(result.begin() + static_cast<long>(k));
+        assignTangentYaw(result);
+        continue;
+      }
+      ++k;
+    }
+
+    path.waypoints = result;
     path.computeLength();
   }
+
+  std::vector<TopoPath> filtered;
+  filtered.reserve(paths.size());
+  for (const auto& path : paths) {
+    if (path.waypoints.size() < 2) continue;
+    if (isTopologicallyDistinct(path, filtered)) {
+      filtered.push_back(path);
+    }
+    if (static_cast<int>(filtered.size()) >= max_paths_) break;
+  }
+  paths = filtered;
 }
 
 // ---------------------------------------------------------------------------
@@ -602,19 +691,20 @@ bool TopologyPlanner::isTopologicallyDistinct(
 
   // Arc-length interpolation lambda
   auto interpolate = [](const TopoPath& tp, double frac) -> Eigen::Vector2d {
-    if (tp.points.empty()) return Eigen::Vector2d::Zero();
-    if (tp.length < 1e-9) return tp.points.front();
+    if (tp.waypoints.empty()) return Eigen::Vector2d::Zero();
+    if (tp.length < 1e-9) return tp.waypoints.front().pos;
     double target = frac * tp.length;
     double acc = 0.0;
-    for (size_t j = 1; j < tp.points.size(); ++j) {
-      double seg = (tp.points[j] - tp.points[j - 1]).norm();
+    for (size_t j = 1; j < tp.waypoints.size(); ++j) {
+      double seg = (tp.waypoints[j].pos - tp.waypoints[j - 1].pos).norm();
       if (acc + seg >= target) {
         double f = (seg > 1e-9) ? (target - acc) / seg : 0.0;
-        return tp.points[j - 1] + f * (tp.points[j] - tp.points[j - 1]);
+        return tp.waypoints[j - 1].pos +
+               f * (tp.waypoints[j].pos - tp.waypoints[j - 1].pos);
       }
       acc += seg;
     }
-    return tp.points.back();
+    return tp.waypoints.back().pos;
   };
 
   for (const auto& ep : existing) {

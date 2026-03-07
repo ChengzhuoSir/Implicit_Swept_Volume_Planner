@@ -43,8 +43,9 @@ private:
   // Dijkstra shortest path
   TopoPath dijkstra(int src, int dst, const std::vector<double>& edge_penalty) const;
 
-  // Algorithm 1: push collision point away using ESDF
-  bool pushPointFromObstacle(Eigen::Vector2d& pt, double safe_dist) const;
+  // Algorithm 1: push a waypoint away using footprint-aware obstacle queries.
+  bool pushPointFromObstacle(TopoWaypoint& wp, double safe_dist) const;
+  bool configurationLineFree(const TopoWaypoint& a, const TopoWaypoint& b) const;
 };
 
 }  // namespace esv_planner

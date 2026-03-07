@@ -5,6 +5,72 @@
 
 namespace esv_planner {
 
+namespace {
+
+bool isOccupiedValue(int8_t val) {
+  return val > 50 || val < 0;
+}
+
+std::vector<double> computeDistanceField(int width,
+                                         int height,
+                                         double resolution,
+                                         const std::vector<int8_t>& grid,
+                                         bool source_is_occupied) {
+  const int n = width * height;
+  std::vector<double> dist(n, kInf);
+
+  struct Cell {
+    int x, y;
+    double dist;
+    bool operator>(const Cell& o) const { return dist > o.dist; }
+  };
+
+  std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> pq;
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const int idx = y * width + x;
+      const bool occupied = isOccupiedValue(grid[idx]);
+      if (occupied == source_is_occupied) {
+        dist[idx] = 0.0;
+        pq.push({x, y, 0.0});
+      }
+    }
+  }
+
+  const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+  const int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  const double dd8[] = {1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414};
+
+  auto isInside = [width, height](int gx, int gy) {
+    return gx >= 0 && gx < width && gy >= 0 && gy < height;
+  };
+
+  while (!pq.empty()) {
+    Cell c = pq.top();
+    pq.pop();
+
+    const int idx = c.y * width + c.x;
+    if (c.dist > dist[idx]) continue;
+
+    for (int i = 0; i < 8; ++i) {
+      const int nx = c.x + dx8[i];
+      const int ny = c.y + dy8[i];
+      if (!isInside(nx, ny)) continue;
+
+      const double nd = c.dist + dd8[i] * resolution;
+      const int nidx = ny * width + nx;
+      if (nd < dist[nidx]) {
+        dist[nidx] = nd;
+        pq.push({nx, ny, nd});
+      }
+    }
+  }
+
+  return dist;
+}
+
+}  // namespace
+
 GridMap::GridMap() {}
 
 void GridMap::fromOccupancyGrid(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
@@ -40,7 +106,7 @@ bool GridMap::isInside(int gx, int gy) const {
 bool GridMap::isOccupied(int gx, int gy) const {
   if (!isInside(gx, gy)) return true;
   int8_t val = inflated_[gy * width_ + gx];
-  return val > 50 || val < 0;
+  return isOccupiedValue(val);
 }
 
 double GridMap::getEsdf(double wx, double wy) const {
@@ -56,7 +122,7 @@ void GridMap::inflateByRadius(double radius) {
   for (int y = 0; y < height_; ++y) {
     for (int x = 0; x < width_; ++x) {
       int8_t val = occupancy_[y * width_ + x];
-      if (val > 50 || val < 0) {
+      if (isOccupiedValue(val)) {
         // Mark all cells within radius as occupied
         for (int dy = -r_cells; dy <= r_cells; ++dy) {
           for (int dx = -r_cells; dx <= r_cells; ++dx) {
@@ -71,63 +137,25 @@ void GridMap::inflateByRadius(double radius) {
       }
     }
   }
+
+  computeEsdf();
 }
 
 void GridMap::computeEsdf() {
-  // Brushfire-based ESDF computation
-  int n = width_ * height_;
+  const int n = width_ * height_;
   esdf_.assign(n, kInf);
+  if (n == 0) return;
 
-  struct Cell {
-    int x, y;
-    double dist;
-    bool operator>(const Cell& o) const { return dist > o.dist; }
-  };
+  const std::vector<double> dist_to_occ =
+      computeDistanceField(width_, height_, resolution_, inflated_, true);
+  const std::vector<double> dist_to_free =
+      computeDistanceField(width_, height_, resolution_, inflated_, false);
 
-  std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> pq;
-
-  // Seed with obstacle cells
-  for (int y = 0; y < height_; ++y) {
-    for (int x = 0; x < width_; ++x) {
-      int idx = y * width_ + x;
-      int8_t val = occupancy_[idx];
-      if (val > 50 || val < 0) {
-        esdf_[idx] = 0.0;
-        pq.push({x, y, 0.0});
-      }
-    }
-  }
-
-  const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-  const int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-  const double dd8[] = {1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414};
-
-  while (!pq.empty()) {
-    Cell c = pq.top();
-    pq.pop();
-
-    int idx = c.y * width_ + c.x;
-    if (c.dist > esdf_[idx]) continue;
-
-    for (int i = 0; i < 8; ++i) {
-      int nx = c.x + dx8[i];
-      int ny = c.y + dy8[i];
-      if (!isInside(nx, ny)) continue;
-
-      double nd = c.dist + dd8[i] * resolution_;
-      int nidx = ny * width_ + nx;
-      if (nd < esdf_[nidx]) {
-        esdf_[nidx] = nd;
-        pq.push({nx, ny, nd});
-      }
-    }
-  }
-
-  // Make signed: negative inside obstacles
   for (int i = 0; i < n; ++i) {
-    int8_t val = occupancy_[i];
-    if (val > 50 || val < 0) {
-      esdf_[i] = -esdf_[i];
+    if (isOccupiedValue(inflated_[i])) {
+      esdf_[i] = -dist_to_free[i];
+    } else {
+      esdf_[i] = dist_to_occ[i];
     }
   }
 }

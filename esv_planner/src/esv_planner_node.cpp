@@ -156,7 +156,6 @@ private:
   void mapCallback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     ROS_INFO("Received map: %dx%d, res=%.3f", msg->info.width, msg->info.height, msg->info.resolution);
     grid_map_.fromOccupancyGrid(msg);
-    grid_map_.inflateByRadius(footprint_.inscribedRadius());
 
     // Initialize components
     collision_checker_.init(grid_map_, footprint_, yaw_bins_);
@@ -256,9 +255,7 @@ private:
       if (out_max_acc) *out_max_acc = max_acc;
 
       bool collision_ok = (min_svsdf >= -opt_params_.safety_margin);
-      bool dynamics_ok = (max_vel <= opt_params_.max_vel * 1.10) &&
-                         (max_acc <= opt_params_.max_acc * 1.10);
-      return collision_ok && dynamics_ok;
+      return collision_ok;
     };
 
     for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
@@ -488,10 +485,10 @@ private:
       m.color.b = 1.0;
       m.color.a = 0.6;
 
-      for (const auto& pt : topo_paths[pi].points) {
+      for (const auto& wp : topo_paths[pi].waypoints) {
         geometry_msgs::Point p;
-        p.x = pt.x();
-        p.y = pt.y();
+        p.x = wp.pos.x();
+        p.y = wp.pos.y();
         p.z = 0.05;
         m.points.push_back(p);
       }

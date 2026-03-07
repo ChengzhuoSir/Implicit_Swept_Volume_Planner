@@ -632,10 +632,10 @@ Trajectory TrajectoryOptimizer::selectBest(
     const Trajectory& traj = candidates[c];
     if (traj.empty()) continue;
 
-    // Check collision along the MINCO curve (not just waypoints)
+    // Keep candidate feasibility consistent with the pipeline-level validation.
     if (svsdf_) {
-      double min_sdf = svsdf_->evaluateTrajectory(traj, 0.1);
-      if (min_sdf < -0.01) continue;  // skip colliding trajectories
+      double min_sdf = svsdf_->evaluateTrajectory(traj, 0.05);
+      if (min_sdf < -params_.safety_margin) continue;
     }
     double cost = 0.0;
 

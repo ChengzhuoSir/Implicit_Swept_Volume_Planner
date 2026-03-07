@@ -34,14 +34,17 @@ private:
   // SafeYaw: assign collision-free yaw closest to desired
   bool safeYaw(SE2State& state, double desired_yaw);
 
-  // SegAdjust: push colliding segment away + sub-segment split
-  bool segAdjust(std::vector<SE2State>& segment);
+  // Push a colliding state toward larger ESDF, then re-run SafeYaw.
+  bool pushStateFromObstacle(SE2State& state, double desired_yaw);
 
-  // Classify risk: check how constrained the yaw is at each point
-  RiskLevel classifyRisk(const std::vector<SE2State>& segment);
+  // SegAdjust: recursively split a failing segment around a pushed pivot.
+  bool segAdjustRecursive(const std::vector<SE2State>& seed,
+                          int depth,
+                          std::vector<SE2State>& repaired);
 
-  // Split states into contiguous segments by risk level
-  std::vector<MotionSegment> segmentByRisk(const std::vector<SE2State>& states);
+  // Resample a straight sub-segment for recursive SegAdjust.
+  std::vector<SE2State> buildLinearSegment(const SE2State& start,
+                                           const SE2State& goal) const;
 };
 
 }  // namespace esv_planner

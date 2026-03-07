@@ -29,6 +29,7 @@ public:
   double yawFromBin(int bin) const;
   int binFromYaw(double yaw) const;
   int numYawBins() const { return num_yaw_bins_; }
+  const FootprintModel& footprint() const { return *footprint_; }
 
 private:
   const GridMap* map_ = nullptr;

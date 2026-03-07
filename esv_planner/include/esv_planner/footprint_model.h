@@ -30,6 +30,9 @@ public:
   // Get polygon rotated by yaw
   std::vector<Eigen::Vector2d> rotatedVertices(double yaw) const;
 
+  // Sample the rotated polygon boundary at approximately `step` spacing.
+  std::vector<Eigen::Vector2d> sampleBoundary(double yaw, double step) const;
+
 private:
   std::vector<Eigen::Vector2d> vertices_;
   double inscribed_radius_ = 0.1;
