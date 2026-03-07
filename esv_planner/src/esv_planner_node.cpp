@@ -16,6 +16,7 @@
 #include "esv_planner/topology_planner.h"
 #include "esv_planner/se2_sequence_generator.h"
 #include "esv_planner/hybrid_astar.h"
+#include "esv_planner/planner_trigger_state.h"
 #include "esv_planner/svsdf_evaluator.h"
 #include "esv_planner/trajectory_optimizer.h"
 
@@ -58,9 +59,7 @@ private:
   // State
   SE2State start_;
   SE2State goal_;
-  bool has_map_ = false;
-  bool has_start_ = false;
-  bool has_goal_ = false;
+  PlannerTriggerState trigger_state_;
   std::vector<MotionSegment> last_segments_;
 
   // Parameters
@@ -140,6 +139,7 @@ private:
     pnh_.param("goal_pose/yaw", gyaw, 1.57);
     start_ = SE2State(sx, sy, syaw);
     goal_ = SE2State(gx, gy, gyaw);
+    trigger_state_.setDefaultStartGoalAvailable();
   }
 
   void setupPubSub() {
@@ -166,32 +166,34 @@ private:
     svsdf_evaluator_.init(grid_map_, footprint_);
     optimizer_.init(grid_map_, svsdf_evaluator_, opt_params_);
 
-    has_map_ = true;
     ROS_INFO("Map processed. ESDF computed. Robot kernels generated.");
 
-    tryPlan();
+    if (trigger_state_.onMapReceived()) {
+      tryPlan();
+    }
   }
 
   void startCallback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg) {
     start_.x = msg->pose.pose.position.x;
     start_.y = msg->pose.pose.position.y;
     start_.yaw = tf2::getYaw(msg->pose.pose.orientation);
-    has_start_ = true;
     ROS_INFO("Start: (%.2f, %.2f, %.2f)", start_.x, start_.y, start_.yaw);
-    tryPlan();
+    trigger_state_.onStartUpdated();
+    ROS_INFO("Start updated. Waiting for goal selection to plan.");
   }
 
   void goalCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
     goal_.x = msg->pose.position.x;
     goal_.y = msg->pose.position.y;
     goal_.yaw = tf2::getYaw(msg->pose.orientation);
-    has_goal_ = true;
     ROS_INFO("Goal: (%.2f, %.2f, %.2f)", goal_.x, goal_.y, goal_.yaw);
-    tryPlan();
+    if (trigger_state_.onGoalUpdated()) {
+      tryPlan();
+    }
   }
 
   void tryPlan() {
-    if (!has_map_) return;
+    if (!trigger_state_.canPlan()) return;
 
     ROS_INFO("=== ESV Planner: Starting planning ===");
     ros::Time t0 = ros::Time::now();

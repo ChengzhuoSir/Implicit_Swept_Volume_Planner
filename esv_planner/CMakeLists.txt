@@ -182,3 +182,12 @@ target_link_libraries(test_optimizer_se2_time_refinement
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
+
+add_executable(test_planner_trigger_state
+  src/test_planner_trigger_state.cpp
+)
+
+target_link_libraries(test_planner_trigger_state
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
