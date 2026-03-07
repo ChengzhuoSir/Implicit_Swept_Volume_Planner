@@ -242,20 +242,16 @@ private:
       double min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj, 0.05);
       double max_vel = 0.0;
       double max_acc = 0.0;
-      double total = traj.totalDuration();
-      for (double t = 0.0; t <= total; t += 0.02) {
-        Eigen::Vector2d v = traj.sampleVelocity(t);
-        Eigen::Vector2d a = traj.sampleAcceleration(t);
-        max_vel = std::max(max_vel, v.norm());
-        max_acc = std::max(max_acc, a.norm());
-      }
+      double max_yaw_rate = 0.0;
+      bool dynamics_ok = optimizer_.dynamicsFeasible(
+          traj, &max_vel, &max_acc, &max_yaw_rate);
 
       if (out_min_svsdf) *out_min_svsdf = min_svsdf;
       if (out_max_vel) *out_max_vel = max_vel;
       if (out_max_acc) *out_max_acc = max_acc;
 
       bool collision_ok = (min_svsdf >= -opt_params_.safety_margin);
-      return collision_ok;
+      return collision_ok && dynamics_ok;
     };
 
     for (size_t pi = 0; pi < topo_paths.size(); ++pi) {

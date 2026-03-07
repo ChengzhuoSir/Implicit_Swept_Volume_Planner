@@ -365,7 +365,7 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
-  return traj;
+  return retimeToDynamicLimits(traj);
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +600,7 @@ Trajectory TrajectoryOptimizer::stitch(
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   result.pos_pieces);
   fitYawQuintic(ds_yaws, ds_durations, 0.0, 0.0, result.yaw_pieces);
-  return result;
+  return retimeToDynamicLimits(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +624,7 @@ Trajectory TrajectoryOptimizer::selectBest(
       double min_sdf = svsdf_->evaluateTrajectory(traj, 0.05);
       if (min_sdf < -params_.safety_margin) continue;
     }
+    if (!dynamicsFeasible(traj)) continue;
     double cost = 0.0;
 
     for (size_t i = 0; i < traj.pos_pieces.size(); ++i) {
@@ -717,11 +718,80 @@ double TrajectoryOptimizer::computeCost(
   return cost;
 }
 
+Trajectory TrajectoryOptimizer::scaleTrajectoryTime(const Trajectory& traj,
+                                                    double scale) const {
+  if (traj.empty()) return traj;
+  if (scale <= 1e-9) return traj;
+  if (std::abs(scale - 1.0) < 1e-9) return traj;
+
+  Trajectory scaled = traj;
+  for (auto& pp : scaled.pos_pieces) {
+    double scale_pow = scale;
+    for (int i = 1; i < 6; ++i) {
+      pp.coeffs.col(i) /= scale_pow;
+      scale_pow *= scale;
+    }
+    pp.duration *= scale;
+  }
+
+  for (auto& yp : scaled.yaw_pieces) {
+    double scale_pow = scale;
+    for (int i = 1; i < 6; ++i) {
+      yp.coeffs(0, i) /= scale_pow;
+      scale_pow *= scale;
+    }
+    yp.duration *= scale;
+  }
+
+  return scaled;
+}
+
+Trajectory TrajectoryOptimizer::retimeToDynamicLimits(const Trajectory& traj) const {
+  if (traj.empty()) return traj;
+
+  double max_vel = 0.0;
+  double max_acc = 0.0;
+  double max_yaw_rate = 0.0;
+  checkDynamics(traj, &max_vel, &max_acc, &max_yaw_rate);
+
+  double vel_scale = 1.0;
+  double acc_scale = 1.0;
+  double yaw_scale = 1.0;
+  if (params_.max_vel > 1e-9) {
+    vel_scale = max_vel / params_.max_vel;
+  }
+  if (params_.max_acc > 1e-9) {
+    acc_scale = std::sqrt(std::max(0.0, max_acc) / params_.max_acc);
+  }
+  if (params_.max_yaw_rate > 1e-9) {
+    yaw_scale = max_yaw_rate / params_.max_yaw_rate;
+  }
+
+  double scale = std::max(vel_scale, std::max(acc_scale, yaw_scale));
+  scale = std::max(0.75, scale);
+  scale *= 1.02;
+
+  return scaleTrajectoryTime(traj, scale);
+}
+
+bool TrajectoryOptimizer::dynamicsFeasible(const Trajectory& traj,
+                                           double* max_vel,
+                                           double* max_acc,
+                                           double* max_yaw_rate) const {
+  return checkDynamics(traj, max_vel, max_acc, max_yaw_rate);
+}
+
 // ---------------------------------------------------------------------------
 // checkDynamics: verify max velocity, acceleration, and yaw-rate constraints
 // ---------------------------------------------------------------------------
-bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj) {
+bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj,
+                                        double* out_max_vel,
+                                        double* out_max_acc,
+                                        double* out_max_yaw_rate) const {
   double dt_sample = 0.02;
+  double max_vel = 0.0;
+  double max_acc = 0.0;
+  double max_yaw_rate = 0.0;
 
   for (size_t i = 0; i < traj.pos_pieces.size(); ++i) {
     const PolyPiece& pp = traj.pos_pieces[i];
@@ -731,8 +801,8 @@ bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj) {
 
     for (int s = 0; s <= n_samples; ++s) {
       double t = s * dt;
-      if (pp.velocity(t).norm() > params_.max_vel * 1.10) return false;
-      if (pp.acceleration(t).norm() > params_.max_acc * 1.10) return false;
+      max_vel = std::max(max_vel, pp.velocity(t).norm());
+      max_acc = std::max(max_acc, pp.acceleration(t).norm());
     }
   }
 
@@ -744,11 +814,17 @@ bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj) {
 
     for (int s = 0; s <= n_samples; ++s) {
       double t = s * dt;
-      if (std::abs(yp.velocity(t)) > params_.max_yaw_rate * 1.10) return false;
+      max_yaw_rate = std::max(max_yaw_rate, std::abs(yp.velocity(t)));
     }
   }
 
-  return true;
+  if (out_max_vel) *out_max_vel = max_vel;
+  if (out_max_acc) *out_max_acc = max_acc;
+  if (out_max_yaw_rate) *out_max_yaw_rate = max_yaw_rate;
+
+  return max_vel <= params_.max_vel * 1.10 &&
+         max_acc <= params_.max_acc * 1.10 &&
+         max_yaw_rate <= params_.max_yaw_rate * 1.10;
 }
 
 }  // namespace esv_planner

@@ -117,7 +117,30 @@ bool evaluateTrajectory(const Trajectory& traj,
                         const OptimizerParams& params) {
   if (traj.empty()) return false;
   double min_svsdf = svsdf.evaluateTrajectory(traj, 0.05);
-  return min_svsdf >= -params.safety_margin;
+  double max_vel = 0.0;
+  double max_acc = 0.0;
+  double max_yaw_rate = 0.0;
+  const double total = traj.totalDuration();
+  for (double t = 0.0; t <= total + 1e-9; t += 0.02) {
+    const double tt = std::min(t, total);
+    max_vel = std::max(max_vel, traj.sampleVelocity(tt).norm());
+    max_acc = std::max(max_acc, traj.sampleAcceleration(tt).norm());
+
+    double acc = 0.0;
+    for (size_t i = 0; i < traj.yaw_pieces.size(); ++i) {
+      const auto& yp = traj.yaw_pieces[i];
+      if (tt <= acc + yp.duration || i + 1 == traj.yaw_pieces.size()) {
+        max_yaw_rate = std::max(max_yaw_rate, std::abs(yp.velocity(tt - acc)));
+        break;
+      }
+      acc += yp.duration;
+    }
+  }
+
+  return min_svsdf >= -params.safety_margin &&
+         max_vel <= params.max_vel * 1.10 &&
+         max_acc <= params.max_acc * 1.10 &&
+         max_yaw_rate <= params.max_yaw_rate * 1.10;
 }
 
 Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,

@@ -174,6 +174,7 @@ bool evaluateTrajectoryMetrics(const Trajectory& traj,
   m.max_vel = 0.0;
   m.max_acc = 0.0;
   m.length_m = 0.0;
+  double max_yaw_rate = 0.0;
 
   SE2State prev = traj.sample(0.0);
   for (double t = 0.02; t <= m.duration_s + 1e-9; t += 0.02) {
@@ -188,11 +189,13 @@ bool evaluateTrajectoryMetrics(const Trajectory& traj,
     Eigen::Vector2d acc = traj.sampleAcceleration(tt);
     m.max_vel = std::max(m.max_vel, vel.norm());
     m.max_acc = std::max(m.max_acc, acc.norm());
+    max_yaw_rate = std::max(max_yaw_rate, std::abs(traj.sampleYawRate(tt)));
   }
 
   bool collision_ok = (m.min_svsdf >= -params.safety_margin);
   bool dynamics_ok = (m.max_vel <= params.max_vel * 1.10) &&
-                     (m.max_acc <= params.max_acc * 1.10);
+                     (m.max_acc <= params.max_acc * 1.10) &&
+                     (max_yaw_rate <= params.max_yaw_rate * 1.10);
   return require_dynamics ? (collision_ok && dynamics_ok) : collision_ok;
 }
 
@@ -243,7 +246,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
 
     Trajectory full = optimizer.stitch(segments, seg_trajs);
     Metrics mm;
-    bool valid = evaluateTrajectoryMetrics(full, svsdf, params, mm, false);
+    bool valid = evaluateTrajectoryMetrics(full, svsdf, params, mm, true);
     if (!valid) {
       bool fallback_ok = true;
       for (size_t si = 0; si < segments.size(); ++si) {
@@ -257,7 +260,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
       }
       if (fallback_ok) {
         full = optimizer.stitch(segments, seg_trajs);
-        valid = evaluateTrajectoryMetrics(full, svsdf, params, mm, false);
+        valid = evaluateTrajectoryMetrics(full, svsdf, params, mm, true);
       }
     }
 
@@ -405,7 +408,7 @@ int main(int argc, char** argv) {
           Metrics m;
           m.runtime_ms = std::chrono::duration<double, std::milli>(te - ts).count();
           m.num_topo_paths = accepted;
-          m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, false);
+          m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, true);
 
           metrics_ofs << sc.name << "," << rb.name << "," << run
                       << ",ESV,multi," << (m.success ? 1 : 0) << ","
@@ -449,7 +452,7 @@ int main(int argc, char** argv) {
             Metrics m;
             m.runtime_ms = std::chrono::duration<double, std::milli>(te - ts).count();
             m.num_topo_paths = 1;
-            m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, false);
+            m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, true);
 
             metrics_ofs << sc.name << "," << rb.name << "," << run
                         << ",SVSDF_like," << topo_mode << ","
@@ -477,7 +480,7 @@ int main(int argc, char** argv) {
             Metrics m;
             m.runtime_ms = std::chrono::duration<double, std::milli>(te - ts).count();
             m.num_topo_paths = 1;
-            m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, false);
+            m.success = evaluateTrajectoryMetrics(traj, svsdf, params, m, true);
 
             metrics_ofs << sc.name << "," << rb.name << "," << run
                         << ",RC_ESDF_like," << topo_mode << ","

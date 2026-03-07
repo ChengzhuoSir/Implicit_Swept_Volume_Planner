@@ -44,6 +44,15 @@ public:
   // Select best candidate trajectory (minimum control cost)
   Trajectory selectBest(const std::vector<Trajectory>& candidates);
 
+  // Uniformly retime a trajectory to satisfy the configured dynamics limits.
+  Trajectory retimeToDynamicLimits(const Trajectory& traj) const;
+
+  // Check velocity / acceleration / yaw-rate feasibility.
+  bool dynamicsFeasible(const Trajectory& traj,
+                        double* max_vel = nullptr,
+                        double* max_acc = nullptr,
+                        double* max_yaw_rate = nullptr) const;
+
 private:
   const GridMap* map_ = nullptr;
   const SvsdfEvaluator* svsdf_ = nullptr;
@@ -69,8 +78,14 @@ private:
   double computeCost(const Trajectory& traj, const std::vector<SE2State>& ref_wps,
                      bool include_svsdf, bool include_residual);
 
+  // Uniformly scale the time parameterization of all trajectory pieces.
+  Trajectory scaleTrajectoryTime(const Trajectory& traj, double scale) const;
+
   // Dynamics feasibility check
-  bool checkDynamics(const Trajectory& traj);
+  bool checkDynamics(const Trajectory& traj,
+                     double* max_vel = nullptr,
+                     double* max_acc = nullptr,
+                     double* max_yaw_rate = nullptr) const;
 };
 
 }  // namespace esv_planner

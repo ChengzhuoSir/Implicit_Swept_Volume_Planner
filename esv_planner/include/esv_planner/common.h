@@ -166,6 +166,18 @@ struct Trajectory {
     }
     return Eigen::Vector2d::Zero();
   }
+
+  // Sample yaw-rate at global time t
+  double sampleYawRate(double t) const {
+    double acc = 0.0;
+    for (size_t i = 0; i < yaw_pieces.size(); ++i) {
+      if (t <= acc + yaw_pieces[i].duration || i + 1 == yaw_pieces.size()) {
+        return yaw_pieces[i].velocity(t - acc);
+      }
+      acc += yaw_pieces[i].duration;
+    }
+    return 0.0;
+  }
 };
 
 struct TopoWaypoint {
