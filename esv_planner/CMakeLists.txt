@@ -156,3 +156,16 @@ target_link_libraries(test_grid_map_esdf
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
+
+add_executable(test_optimizer_r2_paper_semantics
+  src/test_optimizer_r2_paper_semantics.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_optimizer_r2_paper_semantics
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
