@@ -27,6 +27,7 @@ struct FixedCaseReport {
   size_t topo_paths = 0;
   size_t accepted_candidates = 0;
   bool final_esv_valid = false;
+  bool selected_candidate_found = false;
   double best_topo_waypoint_clearance = -kInf;
   double best_sequence_chain_clearance = -kInf;
   double best_segment_optimized_clearance = -kInf;
@@ -34,6 +35,21 @@ struct FixedCaseReport {
   double best_se2_clearance = -kInf;
   double best_stitched_clearance = -kInf;
   double best_final_accepted_clearance = -kInf;
+  double selected_reference_length = 0.0;
+  double selected_trajectory_length = 0.0;
+  double selected_length_ratio = kInf;
+  double selected_max_lateral_bulge = kInf;
+  int selected_heading_oscillation_count = std::numeric_limits<int>::max();
+};
+
+struct AcceptedCandidateRecord {
+  Trajectory traj;
+  std::vector<Eigen::Vector2d> reference_polyline;
+  double trajectory_length = 0.0;
+  double reference_length = 0.0;
+  double length_ratio = kInf;
+  double max_lateral_bulge = kInf;
+  int heading_oscillation_count = std::numeric_limits<int>::max();
 };
 
 bool loadPgm(const std::string& path,
@@ -148,6 +164,125 @@ double continuousChainClearance(const std::vector<SE2State>& waypoints,
     }
   }
   return min_clearance;
+}
+
+std::vector<SE2State> sampleTrajectoryStates(const Trajectory& traj, double sample_step) {
+  std::vector<SE2State> states;
+  if (traj.empty()) return states;
+  const double total = traj.totalDuration();
+  const int n_steps =
+      std::max(1, static_cast<int>(std::ceil(total / std::max(1e-3, sample_step))));
+  states.reserve(static_cast<size_t>(n_steps) + 1);
+  for (int i = 0; i <= n_steps; ++i) {
+    const double t = (i == n_steps) ? total : std::min(total, i * sample_step);
+    states.push_back(traj.sample(t));
+  }
+  return states;
+}
+
+double polylineLength(const std::vector<Eigen::Vector2d>& pts) {
+  if (pts.size() < 2) return 0.0;
+  double len = 0.0;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    len += (pts[i] - pts[i - 1]).norm();
+  }
+  return len;
+}
+
+double sampledTrajectoryLength(const Trajectory& traj, double sample_step) {
+  const auto states = sampleTrajectoryStates(traj, sample_step);
+  if (states.size() < 2) return 0.0;
+  double len = 0.0;
+  for (size_t i = 1; i < states.size(); ++i) {
+    len += (states[i].position() - states[i - 1].position()).norm();
+  }
+  return len;
+}
+
+double pointToSegmentDistance(const Eigen::Vector2d& p,
+                              const Eigen::Vector2d& a,
+                              const Eigen::Vector2d& b) {
+  const Eigen::Vector2d ab = b - a;
+  const double denom = ab.squaredNorm();
+  if (denom < 1e-12) return (p - a).norm();
+  const double t = std::max(0.0, std::min(1.0, (p - a).dot(ab) / denom));
+  const Eigen::Vector2d proj = a + t * ab;
+  return (p - proj).norm();
+}
+
+double maxLateralBulge(const Trajectory& traj,
+                       const std::vector<Eigen::Vector2d>& reference_polyline,
+                       double sample_step) {
+  if (traj.empty() || reference_polyline.size() < 2) return kInf;
+  const auto states = sampleTrajectoryStates(traj, sample_step);
+  double max_dist = 0.0;
+  for (const auto& st : states) {
+    double best = kInf;
+    for (size_t i = 1; i < reference_polyline.size(); ++i) {
+      best = std::min(best, pointToSegmentDistance(
+          st.position(), reference_polyline[i - 1], reference_polyline[i]));
+    }
+    max_dist = std::max(max_dist, best);
+  }
+  return max_dist;
+}
+
+int headingOscillationCount(const Trajectory& traj, double sample_step) {
+  if (traj.empty()) return std::numeric_limits<int>::max();
+  const auto states = sampleTrajectoryStates(traj, sample_step);
+  if (states.size() < 4) return 0;
+
+  std::vector<double> headings;
+  headings.reserve(states.size() - 1);
+  for (size_t i = 1; i < states.size(); ++i) {
+    const Eigen::Vector2d diff = states[i].position() - states[i - 1].position();
+    if (diff.norm() < 1e-4) continue;
+    headings.push_back(std::atan2(diff.y(), diff.x()));
+  }
+  if (headings.size() < 3) return 0;
+
+  constexpr double kTurnEps = 0.08;
+  int oscillations = 0;
+  int prev_sign = 0;
+  for (size_t i = 1; i < headings.size(); ++i) {
+    const double turn = normalizeAngle(headings[i] - headings[i - 1]);
+    if (std::abs(turn) < kTurnEps) continue;
+    const int sign = (turn > 0.0) ? 1 : -1;
+    if (prev_sign != 0 && sign != prev_sign) {
+      ++oscillations;
+    }
+    prev_sign = sign;
+  }
+  return oscillations;
+}
+
+std::vector<Eigen::Vector2d> buildReferencePolyline(
+    const std::vector<MotionSegment>& segments) {
+  std::vector<Eigen::Vector2d> ref;
+  for (size_t si = 0; si < segments.size(); ++si) {
+    for (size_t wi = 0; wi < segments[si].waypoints.size(); ++wi) {
+      if (!ref.empty() &&
+          (segments[si].waypoints[wi].position() - ref.back()).norm() < 1e-9) {
+        continue;
+      }
+      ref.push_back(segments[si].waypoints[wi].position());
+    }
+  }
+  return ref;
+}
+
+bool sameTrajectory(const Trajectory& a, const Trajectory& b) {
+  if (a.pos_pieces.size() != b.pos_pieces.size()) return false;
+  if (a.yaw_pieces.size() != b.yaw_pieces.size()) return false;
+  for (size_t i = 0; i < a.pos_pieces.size(); ++i) {
+    if (std::abs(a.pos_pieces[i].duration - b.pos_pieces[i].duration) > 1e-12) return false;
+    if ((a.pos_pieces[i].coeffs - b.pos_pieces[i].coeffs).cwiseAbs().maxCoeff() > 1e-12) return false;
+  }
+  for (size_t i = 0; i < a.yaw_pieces.size(); ++i) {
+    if (std::abs(a.yaw_pieces[i].duration - b.yaw_pieces[i].duration) > 1e-12) return false;
+    if ((a.yaw_pieces[i].coeffs - b.yaw_pieces[i].coeffs).cwiseAbs().maxCoeff() > 1e-12) return false;
+  }
+  return true;
 }
 
 double topoPathClearance(const TopoPath& path,
@@ -276,6 +411,7 @@ FixedCaseReport runFixedCase() {
   const auto raw_topo_paths = topo_paths;
   topology.shortenPaths(topo_paths);
   report.topo_paths = topo_paths.size();
+  std::vector<AcceptedCandidateRecord> accepted_records;
 
   const double start_clearance = svsdf.evaluate(start);
   const double goal_clearance = svsdf.evaluate(goal);
@@ -414,6 +550,46 @@ FixedCaseReport runFixedCase() {
       report.final_esv_valid = true;
       report.best_final_accepted_clearance =
           std::max(report.best_final_accepted_clearance, stitched_clearance);
+
+      AcceptedCandidateRecord rec;
+      rec.traj = full;
+      rec.reference_polyline = buildReferencePolyline(segments);
+      rec.reference_length = polylineLength(rec.reference_polyline);
+      rec.trajectory_length = sampledTrajectoryLength(full, 0.05);
+      rec.length_ratio = (rec.reference_length > 1e-9)
+                             ? (rec.trajectory_length / rec.reference_length)
+                             : kInf;
+      rec.max_lateral_bulge = maxLateralBulge(full, rec.reference_polyline, 0.05);
+      rec.heading_oscillation_count = headingOscillationCount(full, 0.05);
+      accepted_records.push_back(rec);
+
+      std::cout << "[test]   accepted_shape path=" << pi
+                << " ref_len=" << rec.reference_length
+                << " traj_len=" << rec.trajectory_length
+                << " length_ratio=" << rec.length_ratio
+                << " max_bulge=" << rec.max_lateral_bulge
+                << " heading_oscillations=" << rec.heading_oscillation_count
+                << "\n";
+    }
+  }
+
+  if (!accepted_records.empty()) {
+    std::vector<Trajectory> accepted_trajs;
+    accepted_trajs.reserve(accepted_records.size());
+    for (const auto& rec : accepted_records) {
+      accepted_trajs.push_back(rec.traj);
+    }
+    const Trajectory selected = optimizer.selectBest(accepted_trajs);
+    for (const auto& rec : accepted_records) {
+      if (!selected.empty() && sameTrajectory(selected, rec.traj)) {
+        report.selected_candidate_found = true;
+        report.selected_reference_length = rec.reference_length;
+        report.selected_trajectory_length = rec.trajectory_length;
+        report.selected_length_ratio = rec.length_ratio;
+        report.selected_max_lateral_bulge = rec.max_lateral_bulge;
+        report.selected_heading_oscillation_count = rec.heading_oscillation_count;
+        break;
+      }
     }
   }
 
@@ -432,6 +608,7 @@ int main(int argc, char** argv) {
   std::cout << "[test] summary topo_paths=" << report.topo_paths
             << " accepted_candidates=" << report.accepted_candidates
             << " final_esv_valid=" << (report.final_esv_valid ? 1 : 0)
+            << " selected_candidate_found=" << (report.selected_candidate_found ? 1 : 0)
             << " best_topo_clearance=" << report.best_topo_waypoint_clearance
             << " best_sequence_chain_clearance=" << report.best_sequence_chain_clearance
             << " best_segment_optimized_clearance=" << report.best_segment_optimized_clearance
@@ -439,6 +616,11 @@ int main(int argc, char** argv) {
             << " best_se2_clearance=" << report.best_se2_clearance
             << " best_stitched_clearance=" << report.best_stitched_clearance
             << " best_final_accepted_clearance=" << report.best_final_accepted_clearance
+            << " selected_ref_len=" << report.selected_reference_length
+            << " selected_traj_len=" << report.selected_trajectory_length
+            << " selected_length_ratio=" << report.selected_length_ratio
+            << " selected_max_bulge=" << report.selected_max_lateral_bulge
+            << " selected_heading_oscillations=" << report.selected_heading_oscillation_count
             << "\n";
 
   if (report.topo_paths == 0) {
@@ -455,6 +637,22 @@ int main(int argc, char** argv) {
   }
   if (report.best_final_accepted_clearance < 0.0) {
     std::cerr << "[test] FAIL: accepted fixed-case trajectory must satisfy min_svsdf >= 0.0\n";
+    return 1;
+  }
+  if (!report.selected_candidate_found) {
+    std::cerr << "[test] FAIL: could not match the selected accepted trajectory for shape evaluation\n";
+    return 1;
+  }
+  if (report.selected_length_ratio > 1.03) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory is too inflated relative to the accepted motion chain\n";
+    return 1;
+  }
+  if (report.selected_max_lateral_bulge > 0.08) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory still shows excessive stitch bulge\n";
+    return 1;
+  }
+  if (report.selected_heading_oscillation_count > 0) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory still shows heading oscillation\n";
     return 1;
   }
 
