@@ -379,6 +379,14 @@ private:
         if (segments[si].risk == RiskLevel::HIGH) continue;
         Trajectory seg_traj = optimizer_.optimizeR2(segments[si].waypoints, seg_times[si]);
         if (seg_traj.empty()) {
+          ROS_INFO("  Path %zu low-risk segment %zu upgraded to SE(2) after optimizeR2 failure",
+                   pi, si);
+          seg_traj = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
+          if (!seg_traj.empty()) {
+            segments[si].risk = RiskLevel::HIGH;
+          }
+        }
+        if (seg_traj.empty()) {
           ROS_WARN("  Path %zu discarded: low-risk segment %zu optimizeR2 returned empty "
                    "(wps=%zu est_time=%.3f)", pi, si, segments[si].waypoints.size(), seg_times[si]);
           path_valid = false;

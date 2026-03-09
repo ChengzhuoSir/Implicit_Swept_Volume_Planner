@@ -696,9 +696,7 @@ Trajectory TrajectoryOptimizer::optimizeR2(
           svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
         return conservative;
       }
-      if (chain_clearance >= 0.0) {
-        return conservative;
-      }
+      return Trajectory();
     }
   }
   return traj;

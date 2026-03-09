@@ -345,6 +345,13 @@ FixedCaseReport runFixedCase() {
         }
       } else {
         tr = optimizer.optimizeR2(segments[si].waypoints, seg_times[si]);
+        if (tr.empty()) {
+          std::cout << "[test]     r2_upgrade_to_se2=1\n";
+          tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+          if (!tr.empty()) {
+            segments[si].risk = RiskLevel::HIGH;
+          }
+        }
         if (!tr.empty()) {
           min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
           report.best_r2_clearance = std::max(report.best_r2_clearance, min_svsdf);

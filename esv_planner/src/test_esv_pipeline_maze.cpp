@@ -281,6 +281,14 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
       Trajectory tr = optimizer.optimizeR2(segments[si].waypoints, seg_times[si]);
       if (tr.empty()) {
         std::cout << "[test]   path=" << path_idx
+                  << " low segment " << si << " upgraded to SE2 after R2 failure\n";
+        tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+        if (!tr.empty()) {
+          segments[si].risk = RiskLevel::HIGH;
+        }
+      }
+      if (tr.empty()) {
+        std::cout << "[test]   path=" << path_idx
                   << " reject: low segment " << si << " produced empty R2 traj\n";
         ok = false;
         break;
