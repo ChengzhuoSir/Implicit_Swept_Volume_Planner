@@ -211,17 +211,16 @@ private:
       publishHybridPath(hybrid_path, traj_astar_pub_);
     }
 
-    auto publishHybridFallback = [&](const std::string& reason,
-                                     const std::vector<TopoPath>& topo_paths = std::vector<TopoPath>()) {
-      if (!hybrid_ok || hybrid_path.empty()) {
-        ROS_WARN("%s No Hybrid A* fallback available.", reason.c_str());
-        return;
-      }
+    auto handleEsvFailure = [&](const std::string& reason,
+                                const std::vector<TopoPath>& topo_paths = std::vector<TopoPath>()) {
       ros::Time t1 = ros::Time::now();
       double solve_time = (t1 - t0).toSec();
-      ROS_WARN("%s Falling back to Hybrid A* path.", reason.c_str());
+      ROS_WARN("%s ESV did not produce a publishable trajectory.", reason.c_str());
       last_segments_.clear();
-      publishHybridPath(hybrid_path, traj_pub_);
+      nav_msgs::Path empty_path;
+      empty_path.header.stamp = ros::Time::now();
+      empty_path.header.frame_id = "map";
+      traj_pub_.publish(empty_path);
       publishHybridPath(hybrid_path, traj_astar_pub_);
       publishMarkers(topo_paths, Trajectory(), last_segments_, hybrid_path);
       std_msgs::Float64 time_msg;
@@ -248,7 +247,7 @@ private:
                start_esdf, goal_esdf,
                start_free ? 1 : 0,
                goal_free ? 1 : 0);
-      publishHybridFallback("Stage 1 failed.", topo_paths);
+      handleEsvFailure("Stage 1 failed.", topo_paths);
       return;
     }
 
@@ -463,14 +462,14 @@ private:
 
     if (candidates.empty()) {
       ROS_WARN("No valid trajectories generated!");
-      publishHybridFallback("ESV candidate set empty after strict validation.", topo_paths);
+      handleEsvFailure("ESV candidate set empty after strict validation.", topo_paths);
       return;
     }
 
     Trajectory best = optimizer_.selectBest(candidates);
     if (best.empty()) {
       ROS_WARN("No valid trajectory selected!");
-      publishHybridFallback("ESV selection failed after strict validation.", topo_paths);
+      handleEsvFailure("ESV selection failed after strict validation.", topo_paths);
       return;
     }
 
