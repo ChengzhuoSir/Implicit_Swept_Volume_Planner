@@ -4,9 +4,11 @@ namespace esv_planner {
 
 class PlannerTriggerState {
 public:
+  // Default start/goal values are placeholders for visualization/config only.
+  // They must not arm planning before the user explicitly selects both poses.
   void setDefaultStartGoalAvailable() {
-    has_start_ = true;
-    has_goal_ = true;
+    has_start_ = false;
+    has_goal_ = false;
   }
 
   bool onMapReceived() {

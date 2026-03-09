@@ -8,8 +8,8 @@ int main() {
   PlannerTriggerState state;
   state.setDefaultStartGoalAvailable();
 
-  if (!state.onMapReceived()) {
-    std::cerr << "[test] FAIL: defaults should plan once the map arrives\n";
+  if (state.onMapReceived()) {
+    std::cerr << "[test] FAIL: defaults should not trigger planning when the map arrives\n";
     return 1;
   }
 
