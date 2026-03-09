@@ -398,11 +398,29 @@ void TrajectoryOptimizer::fitYawQuintic(
 // optimizeSE2 — Eq.(3): gradient descent on interior waypoint positions and
 // yaws.  Cost = smoothness + safety (SVSDF penalty) + dynamics penalty.
 // ---------------------------------------------------------------------------
-Trajectory TrajectoryOptimizer::optimizeSE2(
+OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
   int n_wps = static_cast<int>(waypoints.size());
-  if (n_wps < 2) return Trajectory();
+  auto buildResult = [&](const Trajectory& t, OptimizerSourceMode mode) {
+    OptimizerResult result;
+    result.success = !t.empty();
+    result.traj = t;
+    result.source_info.source_mode = mode;
+    result.source_info.used_guard =
+        (mode == OptimizerSourceMode::POLYLINE_GUARD ||
+         mode == OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
+    result.source_info.continuous_source_ok =
+        (mode == OptimizerSourceMode::CONTINUOUS) && !t.empty();
+    if (!t.empty()) {
+      result.min_svsdf = svsdf_ ? svsdf_->evaluateTrajectory(t, 0.05) : kInf;
+      result.dynamics_ok = dynamicsFeasible(t);
+      result.cost = computeCost(t, waypoints, true, true);
+    }
+    return result;
+  };
+
+  if (n_wps < 2) return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 
   std::vector<SE2State> wps = waypoints;
   std::vector<double> durations = allocateTime(wps, total_time);
@@ -413,13 +431,13 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
     Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
     if (!conservative.empty() &&
         svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-      return conservative;
+      return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
     }
 
     Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
     if (!polyline.empty() &&
         svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0) {
-      return polyline;
+      return buildResult(polyline, OptimizerSourceMode::POLYLINE_GUARD);
     }
   }
 
@@ -620,9 +638,10 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
       Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
       if (!conservative.empty() &&
           svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-        return conservative;
+        return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
       }
-      return buildConservativePolylineTrajectory(waypoints, total_time);
+      return buildResult(buildConservativePolylineTrajectory(waypoints, total_time),
+                         OptimizerSourceMode::POLYLINE_GUARD);
     }
   }
 
@@ -631,18 +650,23 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
     if (!conservative.empty() &&
         trajectoryShapeAcceptable(conservative, waypoints) &&
         (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
-      return conservative;
+      return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
     }
 
     Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
     if (!polyline.empty() &&
         trajectoryShapeAcceptable(polyline, waypoints) &&
         (!svsdf_ || svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0)) {
-      return polyline;
+      return buildResult(polyline, OptimizerSourceMode::POLYLINE_GUARD);
     }
   }
 
-  return traj;
+  return buildResult(traj, OptimizerSourceMode::CONTINUOUS);
+}
+
+Trajectory TrajectoryOptimizer::optimizeSE2(
+    const std::vector<SE2State>& waypoints, double total_time) {
+  return optimizeSE2Detailed(waypoints, total_time).traj;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,11 +674,29 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
 // Cost = smoothness + position residual + rotation residual.
 // Yaw is derived from velocity direction after optimisation.
 // ---------------------------------------------------------------------------
-Trajectory TrajectoryOptimizer::optimizeR2(
+OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
   int n_wps = static_cast<int>(waypoints.size());
-  if (n_wps < 2) return Trajectory();
+  auto buildResult = [&](const Trajectory& t, OptimizerSourceMode mode) {
+    OptimizerResult result;
+    result.success = !t.empty();
+    result.traj = t;
+    result.source_info.source_mode = mode;
+    result.source_info.used_guard =
+        (mode == OptimizerSourceMode::POLYLINE_GUARD ||
+         mode == OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
+    result.source_info.continuous_source_ok =
+        (mode == OptimizerSourceMode::CONTINUOUS) && !t.empty();
+    if (!t.empty()) {
+      result.min_svsdf = svsdf_ ? svsdf_->evaluateTrajectory(t, 0.05) : kInf;
+      result.dynamics_ok = dynamicsFeasible(t);
+      result.cost = computeCost(t, waypoints, false, true);
+    }
+    return result;
+  };
+
+  if (n_wps < 2) return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 
   std::vector<SE2State> wps = waypoints;
   std::vector<SE2State> ref = waypoints;
@@ -799,9 +841,9 @@ Trajectory TrajectoryOptimizer::optimizeR2(
       Trajectory conservative = buildConservativePolylineTrajectory(waypoints, total_time);
       if (!conservative.empty() &&
           svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-        return conservative;
+        return buildResult(conservative, OptimizerSourceMode::POLYLINE_GUARD);
       }
-      return Trajectory();
+      return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
     }
   }
 
@@ -810,10 +852,15 @@ Trajectory TrajectoryOptimizer::optimizeR2(
     if (!conservative.empty() &&
         trajectoryShapeAcceptable(conservative, waypoints) &&
         (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
-      return conservative;
+      return buildResult(conservative, OptimizerSourceMode::POLYLINE_GUARD);
     }
   }
-  return traj;
+  return buildResult(traj, OptimizerSourceMode::CONTINUOUS);
+}
+
+Trajectory TrajectoryOptimizer::optimizeR2(
+    const std::vector<SE2State>& waypoints, double total_time) {
+  return optimizeR2Detailed(waypoints, total_time).traj;
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,9 @@ struct AcceptedCandidateRecord {
   double max_lateral_bulge = kInf;
   int heading_oscillation_count = std::numeric_limits<int>::max();
   int reference_heading_oscillation_count = std::numeric_limits<int>::max();
+  OptimizerSourceMode source_mode = OptimizerSourceMode::UNKNOWN;
+  bool used_guard = true;
+  bool continuous_source_ok = false;
 };
 
 bool loadPgm(const std::string& path,
@@ -477,10 +480,12 @@ FixedCaseReport runFixedCase() {
                 << " raw_clearance=" << raw_seg_clearance
                 << " chain_clearance=" << chain_clearance << "\n";
 
+      OptimizerResult opt_result;
       Trajectory tr;
       double min_svsdf = -kInf;
       if (segments[si].risk == RiskLevel::HIGH) {
-        tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+        opt_result = optimizer.optimizeSE2Detailed(segments[si].waypoints, seg_times[si]);
+        tr = opt_result.traj;
         if (!tr.empty()) {
           min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
           report.best_se2_clearance = std::max(report.best_se2_clearance, min_svsdf);
@@ -494,10 +499,12 @@ FixedCaseReport runFixedCase() {
           break;
         }
       } else {
-        tr = optimizer.optimizeR2(segments[si].waypoints, seg_times[si]);
+        opt_result = optimizer.optimizeR2Detailed(segments[si].waypoints, seg_times[si]);
+        tr = opt_result.traj;
         if (tr.empty()) {
           std::cout << "[test]     r2_upgrade_to_se2=1\n";
-          tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+          opt_result = optimizer.optimizeSE2Detailed(segments[si].waypoints, seg_times[si]);
+          tr = opt_result.traj;
           if (!tr.empty()) {
             segments[si].risk = RiskLevel::HIGH;
           }
@@ -577,6 +584,26 @@ FixedCaseReport runFixedCase() {
       rec.heading_oscillation_count = headingOscillationCount(full, 0.05);
       rec.reference_heading_oscillation_count =
           headingOscillationCountForPositions(rec.reference_polyline);
+      rec.source_mode = OptimizerSourceMode::CONTINUOUS;
+      rec.used_guard = false;
+      rec.continuous_source_ok = true;
+      for (size_t si = 0; si < segments.size(); ++si) {
+        OptimizerResult source_result;
+        if (segments[si].risk == RiskLevel::HIGH) {
+          source_result = optimizer.optimizeSE2Detailed(segments[si].waypoints, seg_times[si]);
+        } else {
+          source_result = optimizer.optimizeR2Detailed(segments[si].waypoints, seg_times[si]);
+          if (!source_result.success) {
+            source_result = optimizer.optimizeSE2Detailed(segments[si].waypoints, seg_times[si]);
+          }
+        }
+        if (source_result.source_info.used_guard) {
+          rec.used_guard = true;
+          rec.continuous_source_ok = false;
+          rec.source_mode = source_result.source_info.source_mode;
+          break;
+        }
+      }
       accepted_records.push_back(rec);
 
       std::cout << "[test]   accepted_shape path=" << pi
@@ -587,6 +614,9 @@ FixedCaseReport runFixedCase() {
                 << " heading_oscillations=" << rec.heading_oscillation_count
                 << " reference_heading_oscillations="
                 << rec.reference_heading_oscillation_count
+                << " source_mode=" << static_cast<int>(rec.source_mode)
+                << " used_guard=" << (rec.used_guard ? 1 : 0)
+                << " continuous_source_ok=" << (rec.continuous_source_ok ? 1 : 0)
                 << "\n";
     }
   }
@@ -608,10 +638,9 @@ FixedCaseReport runFixedCase() {
         report.selected_heading_oscillation_count = rec.heading_oscillation_count;
         report.selected_reference_heading_oscillation_count =
             rec.reference_heading_oscillation_count;
-        const OptimizerSourceInfo source_info = optimizer.inspectSource(rec.traj);
-        report.selected_source_mode = source_info.source_mode;
-        report.selected_used_guard = source_info.used_guard;
-        report.selected_continuous_source_ok = source_info.continuous_source_ok;
+        report.selected_source_mode = rec.source_mode;
+        report.selected_used_guard = rec.used_guard;
+        report.selected_continuous_source_ok = rec.continuous_source_ok;
         break;
       }
     }

@@ -35,6 +35,15 @@ struct OptimizerSourceInfo {
   bool continuous_source_ok = false;
 };
 
+struct OptimizerResult {
+  bool success = false;
+  Trajectory traj;
+  OptimizerSourceInfo source_info;
+  double min_svsdf = -kInf;
+  bool dynamics_ok = false;
+  double cost = kInf;
+};
+
 class TrajectoryOptimizer {
 public:
   TrajectoryOptimizer();
@@ -44,10 +53,14 @@ public:
 
   // Optimize SE(2) sub-problem (high-risk segments) — Eq. (3)
   // Jointly optimizes position and yaw with SVSDF collision penalty
+  OptimizerResult optimizeSE2Detailed(const std::vector<SE2State>& waypoints,
+                                      double total_time);
   Trajectory optimizeSE2(const std::vector<SE2State>& waypoints, double total_time);
 
   // Optimize R² sub-problem (low-risk segments) — Eq. (4)
   // Position-only optimization with position/rotation residual penalties
+  OptimizerResult optimizeR2Detailed(const std::vector<SE2State>& waypoints,
+                                     double total_time);
   Trajectory optimizeR2(const std::vector<SE2State>& waypoints, double total_time);
 
   // Stitch SE(2) and R² trajectory segments into a full trajectory
