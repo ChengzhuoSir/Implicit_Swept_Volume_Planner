@@ -326,6 +326,12 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
         svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
       return conservative;
     }
+
+    Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
+    if (!polyline.empty() &&
+        svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0) {
+      return polyline;
+    }
   }
 
   if (svsdf_ && map_ && n_wps > 2 && chain_clearance < 0.0) {
@@ -681,10 +687,18 @@ Trajectory TrajectoryOptimizer::optimizeR2(
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
+  traj = retimeToDynamicLimits(traj);
   if (svsdf_ && !traj.empty()) {
     const double traj_clearance = svsdf_->evaluateTrajectory(traj, 0.05);
-    if (chain_clearance >= 0.0 && traj_clearance < 0.0) {
-      return buildConservativePolylineTrajectory(waypoints, total_time);
+    if (traj_clearance < 0.0) {
+      Trajectory conservative = buildConservativePolylineTrajectory(waypoints, total_time);
+      if (!conservative.empty() &&
+          svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
+        return conservative;
+      }
+      if (chain_clearance >= 0.0) {
+        return conservative;
+      }
     }
   }
   return traj;
@@ -1060,22 +1074,22 @@ Trajectory TrajectoryOptimizer::buildConservativePolylineTrajectory(
     PolyPiece pp;
     pp.duration = T;
     pp.coeffs.col(0) = a.position();
-    pp.coeffs.col(1).setZero();
+    pp.coeffs.col(1) = delta / T;
     pp.coeffs.col(2).setZero();
-    pp.coeffs.col(3) = delta * (10.0 / (T * T * T));
-    pp.coeffs.col(4) = delta * (-15.0 / (T * T * T * T));
-    pp.coeffs.col(5) = delta * (6.0 / (T * T * T * T * T));
+    pp.coeffs.col(3).setZero();
+    pp.coeffs.col(4).setZero();
+    pp.coeffs.col(5).setZero();
     traj.pos_pieces.push_back(pp);
 
     const double yaw_delta = normalizeAngle(b.yaw - a.yaw);
     YawPolyPiece yp;
     yp.duration = T;
     yp.coeffs(0, 0) = a.yaw;
-    yp.coeffs(0, 1) = 0.0;
+    yp.coeffs(0, 1) = yaw_delta / T;
     yp.coeffs(0, 2) = 0.0;
-    yp.coeffs(0, 3) = 10.0 * yaw_delta / (T * T * T);
-    yp.coeffs(0, 4) = -15.0 * yaw_delta / (T * T * T * T);
-    yp.coeffs(0, 5) = 6.0 * yaw_delta / (T * T * T * T * T);
+    yp.coeffs(0, 3) = 0.0;
+    yp.coeffs(0, 4) = 0.0;
+    yp.coeffs(0, 5) = 0.0;
     traj.yaw_pieces.push_back(yp);
   }
 

@@ -37,6 +37,21 @@ Eigen::Vector2d esdfAscentDirection(const GridMap& map,
   return best;
 }
 
+bool pointInPolygon(double px, double py,
+                    const std::vector<Eigen::Vector2d>& verts) {
+  bool inside = false;
+  int n = static_cast<int>(verts.size());
+  for (int i = 0, j = n - 1; i < n; j = i++) {
+    double yi = verts[i].y(), yj = verts[j].y();
+    double xi = verts[i].x(), xj = verts[j].x();
+    if (((yi > py) != (yj > py)) &&
+        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
 }  // namespace
 
 SE2SequenceGenerator::SE2SequenceGenerator() {}
@@ -45,6 +60,7 @@ void SE2SequenceGenerator::init(const GridMap& map, const CollisionChecker& chec
                                  double discretization_step, int max_push_attempts) {
   map_ = &map;
   checker_ = &checker;
+  svsdf_.init(map, checker.footprint());
   disc_step_ = discretization_step;
   max_push_ = max_push_attempts;
 }
@@ -94,6 +110,7 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
 }
 
 double SE2SequenceGenerator::footprintClearance(const SE2State& state) const {
+  const auto rotated = checker_->footprint().rotatedVertices(state.yaw);
   const auto boundary = checker_->footprint().sampleBoundary(
       state.yaw, map_->resolution() * 0.5);
   if (boundary.empty()) {
@@ -105,6 +122,29 @@ double SE2SequenceGenerator::footprintClearance(const SE2State& state) const {
     const double dist = map_->getEsdf(state.x + sample.x(), state.y + sample.y());
     min_dist = std::min(min_dist, dist);
   }
+
+  double bb_min_x = std::numeric_limits<double>::max();
+  double bb_max_x = std::numeric_limits<double>::lowest();
+  double bb_min_y = std::numeric_limits<double>::max();
+  double bb_max_y = std::numeric_limits<double>::lowest();
+  for (const auto& v : rotated) {
+    bb_min_x = std::min(bb_min_x, v.x());
+    bb_max_x = std::max(bb_max_x, v.x());
+    bb_min_y = std::min(bb_min_y, v.y());
+    bb_max_y = std::max(bb_max_y, v.y());
+  }
+
+  const double interior_step = map_->resolution();
+  for (double gx = bb_min_x + 0.5 * interior_step; gx <= bb_max_x; gx += interior_step) {
+    for (double gy = bb_min_y + 0.5 * interior_step; gy <= bb_max_y; gy += interior_step) {
+      if (!pointInPolygon(gx, gy, rotated)) {
+        continue;
+      }
+      const double dist = map_->getEsdf(state.x + gx, state.y + gy);
+      min_dist = std::min(min_dist, dist);
+    }
+  }
+
   return min_dist;
 }
 
@@ -115,9 +155,14 @@ double SE2SequenceGenerator::requiredClearance() const {
 bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
                                           const SE2State& to) const {
   const double len = (to.position() - from.position()).norm();
+  const double yaw_delta = std::abs(normalizeAngle(to.yaw - from.yaw));
   const double sample_step = std::max(0.5 * map_->resolution(), 1e-3);
-  const int n_steps =
+  const double yaw_step = std::max(0.1, 0.5 * kTwoPi / checker_->numYawBins());
+  const int linear_steps =
       std::max(1, static_cast<int>(std::ceil(len / sample_step)));
+  const int yaw_steps =
+      std::max(1, static_cast<int>(std::ceil(yaw_delta / yaw_step)));
+  const int n_steps = std::max(linear_steps, yaw_steps);
   for (int s = 0; s <= n_steps; ++s) {
     const double t = static_cast<double>(s) / static_cast<double>(n_steps);
     SE2State st;
@@ -129,6 +174,40 @@ bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
     }
   }
   return true;
+}
+
+bool SE2SequenceGenerator::bridgeUnsafeTransition(
+    const SE2State& from,
+    const SE2State& to,
+    std::vector<SE2State>& bridge) {
+  bridge.clear();
+  if (transitionSafe(from, to)) {
+    bridge = {from, to};
+    return true;
+  }
+
+  const Eigen::Vector2d delta = to.position() - from.position();
+  const double len = delta.norm();
+  if (len < 1e-9) {
+    return false;
+  }
+
+  const double tangent_yaw = std::atan2(delta.y(), delta.x());
+  for (double ratio : {0.5, 0.35, 0.65}) {
+    SE2State mid(from.x + ratio * delta.x(),
+                 from.y + ratio * delta.y(),
+                 tangent_yaw);
+    if (!pushStateFromObstacle(mid, tangent_yaw)) {
+      continue;
+    }
+    if (!transitionSafe(from, mid) || !transitionSafe(mid, to)) {
+      continue;
+    }
+    bridge = {from, mid, to};
+    return true;
+  }
+
+  return false;
 }
 
 bool SE2SequenceGenerator::safeYaw(SE2State& state, double desired_yaw) {
@@ -310,14 +389,25 @@ bool SE2SequenceGenerator::segAdjustRecursive(const std::vector<SE2State>& seed,
   }
 
   repaired = left_repaired;
-  repaired.insert(repaired.end(), right_repaired.begin() + 1, right_repaired.end());
+  for (size_t i = 1; i < right_repaired.size(); ++i) {
+    if (transitionSafe(repaired.back(), right_repaired[i])) {
+      repaired.push_back(right_repaired[i]);
+      continue;
+    }
+
+    std::vector<SE2State> bridge;
+    if (!bridgeUnsafeTransition(repaired.back(), right_repaired[i], bridge)) {
+      return false;
+    }
+    repaired.insert(repaired.end(), bridge.begin() + 1, bridge.end());
+  }
   return true;
 }
 
 bool SE2SequenceGenerator::repairShortWindow(const std::vector<SE2State>& seed,
                                              std::vector<SE2State>& repaired) {
   if (seed.size() < 2) return false;
-  if (seed.size() > 8) return false;
+  if (seed.size() > 12) return false;
 
   repaired = seed;
   for (size_t i = 1; i + 1 < repaired.size(); ++i) {
@@ -334,13 +424,188 @@ bool SE2SequenceGenerator::repairShortWindow(const std::vector<SE2State>& seed,
     repaired[i] = assigned;
   }
 
+  std::vector<SE2State> expanded;
+  expanded.reserve(repaired.size() + 2);
+  expanded.push_back(repaired.front());
   for (size_t i = 1; i < repaired.size(); ++i) {
-    if (!transitionSafe(repaired[i - 1], repaired[i])) {
+    if (transitionSafe(expanded.back(), repaired[i])) {
+      expanded.push_back(repaired[i]);
+      continue;
+    }
+
+    std::vector<SE2State> bridge;
+    if (!bridgeUnsafeTransition(expanded.back(), repaired[i], bridge)) {
       return false;
+    }
+    expanded.insert(expanded.end(), bridge.begin() + 1, bridge.end());
+  }
+
+  repaired = expanded;
+  return true;
+}
+
+bool SE2SequenceGenerator::tryRepairCombinedWindow(
+    const std::vector<SE2State>& seed,
+    std::vector<SE2State>& repaired) {
+  if (seed.size() < 2) return false;
+  if (segAdjustRecursive(seed, 0, repaired)) {
+    return true;
+  }
+  return repairShortWindow(seed, repaired);
+}
+
+std::vector<SE2State> SE2SequenceGenerator::appendStates(
+    const std::vector<SE2State>& lhs,
+    const std::vector<SE2State>& rhs) const {
+  if (lhs.empty()) return rhs;
+  if (rhs.empty()) return lhs;
+
+  std::vector<SE2State> out = lhs;
+  const bool same_endpoint =
+      (lhs.back().position() - rhs.front().position()).norm() < 1e-6 &&
+      std::abs(normalizeAngle(lhs.back().yaw - rhs.front().yaw)) < 1e-6;
+  out.insert(out.end(), rhs.begin() + (same_endpoint ? 1 : 0), rhs.end());
+  return out;
+}
+
+std::vector<MotionSegment> SE2SequenceGenerator::compactSegments(
+    const std::vector<MotionSegment>& segments) {
+  std::vector<MotionSegment> compacted;
+  compacted.reserve(segments.size());
+
+  for (const auto& seg : segments) {
+    if (seg.waypoints.size() < 2) {
+      continue;
+    }
+    if (!compacted.empty() && compacted.back().risk == seg.risk) {
+      compacted.back().waypoints =
+          appendStates(compacted.back().waypoints, seg.waypoints);
+      continue;
+    }
+    compacted.push_back(seg);
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    for (size_t i = 0; i + 2 < compacted.size(); ++i) {
+      if (compacted[i].risk != RiskLevel::HIGH ||
+          compacted[i + 1].risk != RiskLevel::LOW ||
+          compacted[i + 2].risk != RiskLevel::HIGH ||
+          compacted[i].waypoints.size() > 4 ||
+          compacted[i + 2].waypoints.size() > 4 ||
+          compacted[i + 1].waypoints.size() > 3) {
+        continue;
+      }
+
+      std::vector<SE2State> combined =
+          appendStates(compacted[i].waypoints, compacted[i + 1].waypoints);
+      combined = appendStates(combined, compacted[i + 2].waypoints);
+      if (combined.size() > 10) {
+        continue;
+      }
+
+      MotionSegment replacement;
+      std::vector<SE2State> repaired;
+      if (tryRepairCombinedWindow(combined, repaired)) {
+        replacement.risk = RiskLevel::LOW;
+        replacement.waypoints = repaired;
+      } else {
+        replacement.risk = RiskLevel::HIGH;
+        replacement.waypoints = std::move(combined);
+      }
+
+      compacted.erase(compacted.begin() + static_cast<long>(i),
+                      compacted.begin() + static_cast<long>(i + 3));
+      compacted.insert(compacted.begin() + static_cast<long>(i), replacement);
+      changed = true;
+      break;
+    }
+    if (changed) {
+      continue;
+    }
+
+    for (size_t i = 0; i + 1 < compacted.size(); ++i) {
+      if (compacted[i].risk != RiskLevel::HIGH ||
+          compacted[i + 1].risk != RiskLevel::HIGH ||
+          compacted[i].waypoints.size() > 4 ||
+          compacted[i + 1].waypoints.size() > 4) {
+        continue;
+      }
+
+      MotionSegment replacement;
+      replacement.risk = RiskLevel::HIGH;
+      replacement.waypoints =
+          appendStates(compacted[i].waypoints, compacted[i + 1].waypoints);
+      if (replacement.waypoints.size() > 7) {
+        continue;
+      }
+
+      std::vector<SE2State> repaired;
+      if (tryRepairCombinedWindow(replacement.waypoints, repaired)) {
+        replacement.risk = RiskLevel::LOW;
+        replacement.waypoints = repaired;
+      }
+
+      compacted.erase(compacted.begin() + static_cast<long>(i),
+                      compacted.begin() + static_cast<long>(i + 2));
+      compacted.insert(compacted.begin() + static_cast<long>(i), replacement);
+      changed = true;
+      break;
     }
   }
 
-  return true;
+  std::vector<MotionSegment> merged;
+  merged.reserve(compacted.size());
+  for (const auto& seg : compacted) {
+    if (seg.waypoints.size() < 2) {
+      continue;
+    }
+    if (!merged.empty() && merged.back().risk == seg.risk) {
+      merged.back().waypoints = appendStates(merged.back().waypoints, seg.waypoints);
+    } else {
+      merged.push_back(seg);
+    }
+  }
+  return merged;
+}
+
+double SE2SequenceGenerator::conservativeTrajectoryClearance(
+    const std::vector<SE2State>& waypoints) const {
+  if (waypoints.size() < 2) return -kInf;
+
+  Trajectory traj;
+  traj.pos_pieces.reserve(waypoints.size() - 1);
+  traj.yaw_pieces.reserve(waypoints.size() - 1);
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    const SE2State& a = waypoints[i];
+    const SE2State& b = waypoints[i + 1];
+    const Eigen::Vector2d delta = b.position() - a.position();
+    const double T = std::max(0.05, delta.norm());
+
+    PolyPiece pp;
+    pp.duration = T;
+    pp.coeffs.col(0) = a.position();
+    pp.coeffs.col(1) = delta / T;
+    pp.coeffs.col(2).setZero();
+    pp.coeffs.col(3).setZero();
+    pp.coeffs.col(4).setZero();
+    pp.coeffs.col(5).setZero();
+    traj.pos_pieces.push_back(pp);
+
+    YawPolyPiece yp;
+    yp.duration = T;
+    yp.coeffs(0, 0) = a.yaw;
+    yp.coeffs(0, 1) = normalizeAngle(b.yaw - a.yaw) / T;
+    yp.coeffs(0, 2) = 0.0;
+    yp.coeffs(0, 3) = 0.0;
+    yp.coeffs(0, 4) = 0.0;
+    yp.coeffs(0, 5) = 0.0;
+    traj.yaw_pieces.push_back(yp);
+  }
+
+  return svsdf_.evaluateTrajectory(traj, 0.05);
 }
 
 std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
@@ -374,7 +639,7 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     bool found_next_anchor = false;
     const bool edge_failure = yaw_ok && !edge_ok;
     const size_t search_end = edge_failure
-        ? std::min(states.size() - 1, i + 2)
+        ? std::min(states.size() - 1, i + 3)
         : states.size() - 1;
     for (; next_safe_idx <= search_end; ++next_safe_idx) {
       next_safe = states[next_safe_idx];
@@ -463,17 +728,55 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
   if (current.waypoints.empty()) {
     current.waypoints.push_back(states.front());
   }
-  if ((current.waypoints.back().position() - states.back().position()).norm() > 1e-6) {
-    current.waypoints.push_back(states.back());
+
+  const auto sameState = [](const SE2State& a, const SE2State& b) {
+    return (a.position() - b.position()).norm() < 1e-6 &&
+           std::abs(normalizeAngle(a.yaw - b.yaw)) < 1e-6;
+  };
+
+  const SE2State final_state = states.back();
+  if (sameState(current.waypoints.back(), final_state)) {
+    current.waypoints.back() = final_state;
+  } else if (transitionSafe(current.waypoints.back(), final_state)) {
+    current.waypoints.push_back(final_state);
   } else {
-    current.waypoints.back() = states.back();
+    const size_t tail_count = std::min<size_t>(current.waypoints.size(), 8);
+    std::vector<SE2State> seed(current.waypoints.end() - tail_count,
+                               current.waypoints.end());
+    if (sameState(seed.back(), final_state)) {
+      seed.back() = final_state;
+    } else {
+      seed.push_back(final_state);
+    }
+
+    std::vector<SE2State> repaired;
+    if (tryRepairCombinedWindow(seed, repaired)) {
+      current.waypoints.resize(current.waypoints.size() - tail_count);
+      if (current.waypoints.empty()) {
+        current.waypoints = repaired;
+      } else {
+        current.waypoints = appendStates(current.waypoints, repaired);
+      }
+    } else {
+      MotionSegment prefix = current;
+      prefix.waypoints.resize(current.waypoints.size() - tail_count);
+      if (prefix.waypoints.size() >= 2) {
+        segments.push_back(prefix);
+      }
+
+      MotionSegment high;
+      high.risk = RiskLevel::HIGH;
+      high.waypoints = seed;
+      segments.push_back(high);
+      current = MotionSegment();
+    }
   }
 
   if (current.waypoints.size() >= 2) {
     segments.push_back(current);
   }
 
-  return segments;
+  return compactSegments(segments);
 }
 
 }  // namespace esv_planner

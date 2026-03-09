@@ -124,6 +124,7 @@ add_executable(test_motion_sequence
   src/collision_checker.cpp
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
 )
 
 target_link_libraries(test_motion_sequence

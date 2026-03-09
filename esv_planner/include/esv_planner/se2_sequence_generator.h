@@ -3,6 +3,7 @@
 #include <esv_planner/common.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/collision_checker.h>
+#include <esv_planner/svsdf_evaluator.h>
 #include <vector>
 
 namespace esv_planner {
@@ -23,6 +24,7 @@ public:
 private:
   const GridMap* map_ = nullptr;
   const CollisionChecker* checker_ = nullptr;
+  SvsdfEvaluator svsdf_;
   double disc_step_ = 0.15;
   int max_push_ = 5;
 
@@ -44,6 +46,11 @@ private:
   // Validate the continuous interpolated motion between two assigned states.
   bool transitionSafe(const SE2State& from, const SE2State& to) const;
 
+  // Try to repair a locally unsafe edge by inserting one pushed midpoint.
+  bool bridgeUnsafeTransition(const SE2State& from,
+                              const SE2State& to,
+                              std::vector<SE2State>& bridge);
+
   // Push a colliding state toward larger ESDF, then re-run SafeYaw.
   bool pushStateFromObstacle(SE2State& state, double desired_yaw);
 
@@ -55,6 +62,26 @@ private:
   // Fallback for short local failures that do not justify a full HIGH segment.
   bool repairShortWindow(const std::vector<SE2State>& seed,
                          std::vector<SE2State>& repaired);
+
+  // Re-run local repair on fragmented HIGH/LOW windows to keep HIGH coverage
+  // as local as possible and avoid tiny oscillating segments.
+  bool tryRepairCombinedWindow(const std::vector<SE2State>& seed,
+                               std::vector<SE2State>& repaired);
+
+  // Deduplicate shared boundary states while concatenating segment waypoint
+  // chains.
+  std::vector<SE2State> appendStates(const std::vector<SE2State>& lhs,
+                                     const std::vector<SE2State>& rhs) const;
+
+  // Merge adjacent same-risk segments and compact short HIGH/LOW/HIGH
+  // oscillations produced by local edge failures.
+  std::vector<MotionSegment> compactSegments(
+      const std::vector<MotionSegment>& segments);
+
+  // Conservative acceptance check using the same piecewise linear state chain
+  // semantics as the downstream fallback validator.
+  double conservativeTrajectoryClearance(
+      const std::vector<SE2State>& waypoints) const;
 
   // Resample a straight sub-segment for recursive SegAdjust.
   std::vector<SE2State> buildLinearSegment(const SE2State& start,
