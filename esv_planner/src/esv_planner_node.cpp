@@ -211,6 +211,24 @@ private:
       publishHybridPath(hybrid_path, traj_astar_pub_);
     }
 
+    auto publishHybridFallback = [&](const std::string& reason,
+                                     const std::vector<TopoPath>& topo_paths = std::vector<TopoPath>()) {
+      if (!hybrid_ok || hybrid_path.empty()) {
+        ROS_WARN("%s No Hybrid A* fallback available.", reason.c_str());
+        return;
+      }
+      ros::Time t1 = ros::Time::now();
+      double solve_time = (t1 - t0).toSec();
+      ROS_WARN("%s Falling back to Hybrid A* path.", reason.c_str());
+      last_segments_.clear();
+      publishHybridPath(hybrid_path, traj_pub_);
+      publishHybridPath(hybrid_path, traj_astar_pub_);
+      publishMarkers(topo_paths, Trajectory(), last_segments_, hybrid_path);
+      std_msgs::Float64 time_msg;
+      time_msg.data = solve_time;
+      time_pub_.publish(time_msg);
+    };
+
     // Stage 1: Topology path generation
     topology_planner_.buildRoadmap(start_.position(), goal_.position());
     auto topo_paths = topology_planner_.searchPaths();
@@ -230,6 +248,7 @@ private:
                start_esdf, goal_esdf,
                start_free ? 1 : 0,
                goal_free ? 1 : 0);
+      publishHybridFallback("Stage 1 failed.", topo_paths);
       return;
     }
 
@@ -271,8 +290,7 @@ private:
           traj, &report.max_vel, &report.max_acc, &report.max_yaw_rate);
       report.collision_free = (report.min_svsdf >= 0.0);
       report.margin_ok = (report.min_svsdf >= opt_params_.safety_margin);
-      report.accepted_by_current_gate =
-          (report.min_svsdf >= -opt_params_.safety_margin) && report.dynamics_ok;
+      report.accepted_by_current_gate = report.collision_free && report.dynamics_ok;
       return report;
     };
 
@@ -342,7 +360,7 @@ private:
           break;
         }
         ValidationReport seg_report = inspectTrajectory(seg_traj);
-        if (seg_report.min_svsdf < -opt_params_.safety_margin) {
+        if (seg_report.min_svsdf < 0.0) {
           ROS_WARN("  Path %zu discarded: high-risk segment %zu infeasible: %s",
                    pi, si, formatValidation(seg_report).c_str());
           path_valid = false;
@@ -396,7 +414,7 @@ private:
             break;
           }
           ValidationReport fallback_seg_report = inspectTrajectory(reopt);
-          if (fallback_seg_report.min_svsdf < -opt_params_.safety_margin) {
+          if (fallback_seg_report.min_svsdf < 0.0) {
             ROS_WARN("  Path %zu fallback failed: upgraded segment %zu infeasible: %s",
                      pi, si, formatValidation(fallback_seg_report).c_str());
             fallback_ok = false;
@@ -419,9 +437,9 @@ private:
         ROS_INFO("  Path %zu accepted: %s", pi, formatValidation(full_report).c_str());
         if (!full_report.collision_free) {
           ROS_ERROR("  Path %zu accepted even though it penetrates obstacles "
-                    "(min_svsdf=%.3f). Current hard gate only rejects "
-                    "min_svsdf < -safety_margin (%.3f).",
-                    pi, full_report.min_svsdf, opt_params_.safety_margin);
+                    "(min_svsdf=%.3f). This should be impossible with the current "
+                    "strict collision gate.",
+                    pi, full_report.min_svsdf);
         } else if (!full_report.margin_ok) {
           ROS_WARN("  Path %zu accepted but clearance is below desired safety_margin "
                    "(min_svsdf=%.3f < %.3f).",
@@ -436,12 +454,14 @@ private:
 
     if (candidates.empty()) {
       ROS_WARN("No valid trajectories generated!");
+      publishHybridFallback("ESV candidate set empty after strict validation.", topo_paths);
       return;
     }
 
     Trajectory best = optimizer_.selectBest(candidates);
     if (best.empty()) {
       ROS_WARN("No valid trajectory selected!");
+      publishHybridFallback("ESV selection failed after strict validation.", topo_paths);
       return;
     }
 
@@ -576,7 +596,7 @@ private:
     }
 
     // Best trajectory
-    {
+    if (!best.empty()) {
       visualization_msgs::Marker m;
       m.header.frame_id = "map";
       m.header.stamp = ros::Time::now();

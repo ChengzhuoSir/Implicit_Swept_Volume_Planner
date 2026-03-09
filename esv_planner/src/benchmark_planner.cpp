@@ -192,7 +192,7 @@ bool evaluateTrajectoryMetrics(const Trajectory& traj,
     max_yaw_rate = std::max(max_yaw_rate, std::abs(traj.sampleYawRate(tt)));
   }
 
-  bool collision_ok = (m.min_svsdf >= -params.safety_margin);
+  bool collision_ok = (m.min_svsdf >= 0.0);
   bool dynamics_ok = (m.max_vel <= params.max_vel * 1.10) &&
                      (m.max_acc <= params.max_acc * 1.10) &&
                      (max_yaw_rate <= params.max_yaw_rate * 1.10);
@@ -225,7 +225,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
     for (size_t si = 0; si < segments.size(); ++si) {
       if (segments[si].risk != RiskLevel::HIGH) continue;
       Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -params.safety_margin) {
+      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
         ok = false;
         break;
       }
@@ -252,7 +252,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
       for (size_t si = 0; si < segments.size(); ++si) {
         if (segments[si].risk == RiskLevel::HIGH) continue;
         Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -params.safety_margin) {
+        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
           fallback_ok = false;
           break;
         }

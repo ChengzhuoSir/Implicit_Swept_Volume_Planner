@@ -41,7 +41,8 @@ public:
   Trajectory stitch(const std::vector<MotionSegment>& segments,
                     const std::vector<Trajectory>& optimized);
 
-  // Select best candidate trajectory (minimum control cost)
+  // Select the best collision-free candidate, prioritizing clearance first and
+  // smoothness second.
   Trajectory selectBest(const std::vector<Trajectory>& candidates);
 
   // Uniformly retime a trajectory to satisfy the configured dynamics limits.

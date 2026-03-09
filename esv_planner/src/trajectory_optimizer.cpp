@@ -529,6 +529,9 @@ Trajectory TrajectoryOptimizer::stitch(
 
   size_t count = std::min(segments.size(), optimized.size());
   if (count == 0) return Trajectory();
+  if (count == 1 && !optimized[0].empty()) {
+    return retimeToDynamicLimits(optimized[0]);
+  }
 
   // Collect optimised waypoints by sampling per-segment trajectories
   std::vector<Eigen::Vector2d> all_pos;
@@ -552,65 +555,75 @@ Trajectory TrajectoryOptimizer::stitch(
 
   if (all_pos.size() < 2) return Trajectory();
 
-  // Downsample to ~1.5m spacing
-  double min_piece_len = 1.5;
-  std::vector<Eigen::Vector2d> ds_pos;
-  std::vector<double> ds_yaws;
-  ds_pos.push_back(all_pos[0]);
-  ds_yaws.push_back(all_yaws[0]);
-
-  double accum = 0.0;
-  for (size_t i = 1; i < all_pos.size(); ++i) {
-    accum += (all_pos[i] - all_pos[i - 1]).norm();
-    if (accum >= min_piece_len || i == all_pos.size() - 1) {
-      ds_pos.push_back(all_pos[i]);
-      ds_yaws.push_back(all_yaws[i]);
-      accum = 0.0;
-    }
-  }
-
   // Allocate time
   double total_time = 0.0;
   for (const auto& t : optimized) total_time += t.totalDuration();
-  std::vector<SE2State> ds_wps(ds_pos.size());
-  for (size_t i = 0; i < ds_pos.size(); ++i) {
-    ds_wps[i] = SE2State(ds_pos[i].x(), ds_pos[i].y(), ds_yaws[i]);
+
+  auto buildFromSpacing = [&](double min_piece_len) {
+    std::vector<Eigen::Vector2d> ds_pos;
+    std::vector<double> ds_yaws;
+    ds_pos.push_back(all_pos[0]);
+    ds_yaws.push_back(all_yaws[0]);
+
+    double accum = 0.0;
+    for (size_t i = 1; i < all_pos.size(); ++i) {
+      accum += (all_pos[i] - all_pos[i - 1]).norm();
+      if (accum >= min_piece_len || i == all_pos.size() - 1) {
+        ds_pos.push_back(all_pos[i]);
+        ds_yaws.push_back(all_yaws[i]);
+        accum = 0.0;
+      }
+    }
+
+    std::vector<SE2State> ds_wps(ds_pos.size());
+    for (size_t i = 0; i < ds_pos.size(); ++i) {
+      ds_wps[i] = SE2State(ds_pos[i].x(), ds_pos[i].y(), ds_yaws[i]);
+    }
+    std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
+
+    Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
+    Eigen::Vector2d vf = Eigen::Vector2d::Zero();
+    if (ds_pos.size() >= 2) {
+      double dt0 = ds_durations[0];
+      if (dt0 < 0.1) dt0 = 0.1;
+      v0 = (ds_pos[1] - ds_pos[0]) / dt0;
+      double v0n = v0.norm();
+      if (v0n > params_.max_vel) v0 *= params_.max_vel / v0n;
+
+      double dtf = ds_durations.back();
+      if (dtf < 0.1) dtf = 0.1;
+      vf = (ds_pos.back() - ds_pos[ds_pos.size() - 2]) / dtf;
+      double vfn = vf.norm();
+      if (vfn > params_.max_vel) vf *= params_.max_vel / vfn;
+    }
+
+    Trajectory result;
+    fitMincoQuintic(ds_pos, ds_durations, v0, vf,
+                    Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+                    result.pos_pieces);
+    fitYawQuintic(ds_yaws, ds_durations, 0.0, 0.0, result.yaw_pieces);
+    return retimeToDynamicLimits(result);
+  };
+
+  Trajectory result = buildFromSpacing(1.5);
+  if (svsdf_ && !result.empty() && svsdf_->evaluateTrajectory(result, 0.05) < 0.0) {
+    result = buildFromSpacing(0.45);
   }
-  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
-
-  // Estimate boundary velocities from direction
-  Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
-  Eigen::Vector2d vf = Eigen::Vector2d::Zero();
-  if (ds_pos.size() >= 2) {
-    double dt0 = ds_durations[0];
-    if (dt0 < 0.1) dt0 = 0.1;
-    v0 = (ds_pos[1] - ds_pos[0]) / dt0;
-    double v0n = v0.norm();
-    if (v0n > params_.max_vel) v0 *= params_.max_vel / v0n;
-
-    double dtf = ds_durations.back();
-    if (dtf < 0.1) dtf = 0.1;
-    vf = (ds_pos.back() - ds_pos[ds_pos.size() - 2]) / dtf;
-    double vfn = vf.norm();
-    if (vfn > params_.max_vel) vf *= params_.max_vel / vfn;
+  if (svsdf_ && !result.empty() && svsdf_->evaluateTrajectory(result, 0.05) < 0.0) {
+    result = buildFromSpacing(0.20);
   }
-
-  Trajectory result;
-  fitMincoQuintic(ds_pos, ds_durations, v0, vf,
-                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
-                  result.pos_pieces);
-  fitYawQuintic(ds_yaws, ds_durations, 0.0, 0.0, result.yaw_pieces);
-  return retimeToDynamicLimits(result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
-// selectBest: pick trajectory with minimum integral of acceleration squared
+// selectBest: prefer larger clearance, then minimum integral of acceleration squared
 // ---------------------------------------------------------------------------
 Trajectory TrajectoryOptimizer::selectBest(
     const std::vector<Trajectory>& candidates) {
 
   if (candidates.empty()) return Trajectory();
 
+  double best_clearance = -kInf;
   double best_cost = kInf;
   size_t best_idx = 0;
   bool found = false;
@@ -619,12 +632,13 @@ Trajectory TrajectoryOptimizer::selectBest(
     const Trajectory& traj = candidates[c];
     if (traj.empty()) continue;
 
-    // Keep candidate feasibility consistent with the pipeline-level validation.
+    double min_sdf = kInf;
     if (svsdf_) {
-      double min_sdf = svsdf_->evaluateTrajectory(traj, 0.05);
-      if (min_sdf < -params_.safety_margin) continue;
+      min_sdf = svsdf_->evaluateTrajectory(traj, 0.05);
+      if (min_sdf < 0.0) continue;
     }
     if (!dynamicsFeasible(traj)) continue;
+
     double cost = 0.0;
 
     for (size_t i = 0; i < traj.pos_pieces.size(); ++i) {
@@ -642,7 +656,10 @@ Trajectory TrajectoryOptimizer::selectBest(
       }
     }
 
-    if (cost < best_cost) {
+    const bool better_clearance = (min_sdf > best_clearance + 1e-6);
+    const bool same_clearance = std::abs(min_sdf - best_clearance) <= 1e-6;
+    if (!found || better_clearance || (same_clearance && cost < best_cost)) {
+      best_clearance = min_sdf;
       best_cost = cost;
       best_idx = c;
       found = true;

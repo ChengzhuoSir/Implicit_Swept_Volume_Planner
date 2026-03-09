@@ -137,7 +137,7 @@ bool evaluateTrajectory(const Trajectory& traj,
     }
   }
 
-  return min_svsdf >= -params.safety_margin &&
+  return min_svsdf >= 0.0 &&
          max_vel <= params.max_vel * 1.10 &&
          max_acc <= params.max_acc * 1.10 &&
          max_yaw_rate <= params.max_yaw_rate * 1.10;
@@ -186,7 +186,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
     for (size_t si = 0; si < segments.size(); ++si) {
       if (segments[si].risk != RiskLevel::HIGH) continue;
       Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -params.safety_margin) {
+      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
         ok = false;
         break;
       }
@@ -206,7 +206,25 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
     if (!ok) continue;
 
     Trajectory full = optimizer.stitch(segments, seg_trajs);
-    if (evaluateTrajectory(full, svsdf, params)) {
+    bool valid = evaluateTrajectory(full, svsdf, params);
+    if (!valid) {
+      bool fallback_ok = true;
+      for (size_t si = 0; si < segments.size(); ++si) {
+        if (segments[si].risk == RiskLevel::HIGH) continue;
+        Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
+        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
+          fallback_ok = false;
+          break;
+        }
+        seg_trajs[si] = tr;
+      }
+      if (fallback_ok) {
+        full = optimizer.stitch(segments, seg_trajs);
+        valid = evaluateTrajectory(full, svsdf, params);
+      }
+    }
+
+    if (valid) {
       candidates.push_back(full);
       ++accepted_candidates;
     }
@@ -222,7 +240,7 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "test_esv_pipeline_maze", ros::init_options::NoSigintHandler);
   ros::Time::init();
 
-  const std::string map_path = "/home/chengzhuo/workspace/plan/src/.worktrees/esv-paper-repro/esv_planner/maps/maze.pgm";
+  const std::string map_path = "/home/chengzhuo/workspace/plan/src/esv_planner/maps/maze.pgm";
 
   int width = 0, height = 0, maxval = 0;
   std::vector<uint8_t> pixels;

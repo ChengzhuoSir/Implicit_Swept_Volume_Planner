@@ -314,7 +314,7 @@ int main(int argc, char** argv)
     if (out_max_vel) *out_max_vel = max_vel;
     if (out_max_acc) *out_max_acc = max_acc;
 
-    bool collision_ok = (min_svsdf >= -opt_params.safety_margin);
+    bool collision_ok = (min_svsdf >= 0.0);
     bool dynamics_ok = (max_vel <= opt_params.max_vel * 1.10) &&
                        (max_acc <= opt_params.max_acc * 1.10);
     return collision_ok && dynamics_ok;
@@ -356,7 +356,7 @@ int main(int argc, char** argv)
     for (size_t si = 0; si < segments.size(); ++si) {
       if (segments[si].risk != RiskLevel::HIGH) continue;
       Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -opt_params.safety_margin) {
+      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
         path_valid = false;
         break;
       }
@@ -389,7 +389,7 @@ int main(int argc, char** argv)
       for (size_t si = 0; si < segments.size(); ++si) {
         if (segments[si].risk == RiskLevel::HIGH) continue;
         Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < -opt_params.safety_margin) {
+        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
           fallback_ok = false;
           break;
         }
@@ -459,7 +459,7 @@ int main(int argc, char** argv)
   double dt_total_ms =
       std::chrono::duration<double, std::milli>(t_total_end - t_total_start).count();
 
-  bool pass = (min_svsdf > -opt_params.safety_margin) &&
+  bool pass = (min_svsdf >= 0.0) &&
               (best_pieces > 0) &&
               (max_vel <= opt_params.max_vel * 1.10) &&
               (max_acc <= opt_params.max_acc * 1.10);
