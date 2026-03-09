@@ -28,9 +28,12 @@ struct FixedCaseReport {
   size_t accepted_candidates = 0;
   bool final_esv_valid = false;
   double best_topo_waypoint_clearance = -kInf;
+  double best_sequence_chain_clearance = -kInf;
+  double best_segment_optimized_clearance = -kInf;
   double best_r2_clearance = -kInf;
   double best_se2_clearance = -kInf;
   double best_stitched_clearance = -kInf;
+  double best_final_accepted_clearance = -kInf;
 };
 
 bool loadPgm(const std::string& path,
@@ -265,8 +268,8 @@ FixedCaseReport runFixedCase() {
   TrajectoryOptimizer optimizer;
   optimizer.init(map, svsdf, params);
 
-  const SE2State start(0.77, 5.53, 0.07);
-  const SE2State goal(9.15, 3.04, 1.58);
+  const SE2State start(1.06, 7.55, -1.57);
+  const SE2State goal(8.97, 3.63, 1.52);
 
   topology.buildRoadmap(start.position(), goal.position());
   auto topo_paths = topology.searchPaths();
@@ -316,6 +319,8 @@ FixedCaseReport runFixedCase() {
       const double raw_seg_clearance = waypointPathClearance(segments[si].waypoints, svsdf);
       const double chain_clearance = continuousChainClearance(
           segments[si].waypoints, svsdf, 0.05);
+      report.best_sequence_chain_clearance =
+          std::max(report.best_sequence_chain_clearance, chain_clearance);
       std::cout << "[test]   seg=" << si
                 << " risk=" << (segments[si].risk == RiskLevel::HIGH ? "HIGH" : "LOW")
                 << " wps=" << segments[si].waypoints.size()
@@ -329,6 +334,8 @@ FixedCaseReport runFixedCase() {
         if (!tr.empty()) {
           min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
           report.best_se2_clearance = std::max(report.best_se2_clearance, min_svsdf);
+          report.best_segment_optimized_clearance =
+              std::max(report.best_segment_optimized_clearance, min_svsdf);
         }
         std::cout << "[test]     se2_clearance=" << min_svsdf
                   << " traj_empty=" << (tr.empty() ? 1 : 0) << "\n";
@@ -341,6 +348,8 @@ FixedCaseReport runFixedCase() {
         if (!tr.empty()) {
           min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
           report.best_r2_clearance = std::max(report.best_r2_clearance, min_svsdf);
+          report.best_segment_optimized_clearance =
+              std::max(report.best_segment_optimized_clearance, min_svsdf);
         }
         std::cout << "[test]     r2_clearance=" << min_svsdf
                   << " traj_empty=" << (tr.empty() ? 1 : 0) << "\n";
@@ -396,6 +405,8 @@ FixedCaseReport runFixedCase() {
     if (valid) {
       ++report.accepted_candidates;
       report.final_esv_valid = true;
+      report.best_final_accepted_clearance =
+          std::max(report.best_final_accepted_clearance, stitched_clearance);
     }
   }
 
@@ -415,9 +426,12 @@ int main(int argc, char** argv) {
             << " accepted_candidates=" << report.accepted_candidates
             << " final_esv_valid=" << (report.final_esv_valid ? 1 : 0)
             << " best_topo_clearance=" << report.best_topo_waypoint_clearance
+            << " best_sequence_chain_clearance=" << report.best_sequence_chain_clearance
+            << " best_segment_optimized_clearance=" << report.best_segment_optimized_clearance
             << " best_r2_clearance=" << report.best_r2_clearance
             << " best_se2_clearance=" << report.best_se2_clearance
             << " best_stitched_clearance=" << report.best_stitched_clearance
+            << " best_final_accepted_clearance=" << report.best_final_accepted_clearance
             << "\n";
 
   if (report.topo_paths == 0) {
@@ -426,6 +440,14 @@ int main(int argc, char** argv) {
   }
   if (!report.final_esv_valid) {
     std::cerr << "[test] FAIL: fixed case still requires fallback; use diagnostics above to identify the first failing layer\n";
+    return 1;
+  }
+  if (report.accepted_candidates < 1) {
+    std::cerr << "[test] FAIL: expected at least one accepted ESV candidate for the fixed case\n";
+    return 1;
+  }
+  if (report.best_final_accepted_clearance < 0.0) {
+    std::cerr << "[test] FAIL: accepted fixed-case trajectory must satisfy min_svsdf >= 0.0\n";
     return 1;
   }
 
