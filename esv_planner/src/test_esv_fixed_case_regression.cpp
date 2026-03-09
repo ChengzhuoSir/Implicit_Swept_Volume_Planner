@@ -41,6 +41,9 @@ struct FixedCaseReport {
   double selected_max_lateral_bulge = kInf;
   int selected_heading_oscillation_count = std::numeric_limits<int>::max();
   int selected_reference_heading_oscillation_count = std::numeric_limits<int>::max();
+  OptimizerSourceMode selected_source_mode = OptimizerSourceMode::UNKNOWN;
+  bool selected_used_guard = true;
+  bool selected_continuous_source_ok = false;
 };
 
 struct AcceptedCandidateRecord {
@@ -605,6 +608,10 @@ FixedCaseReport runFixedCase() {
         report.selected_heading_oscillation_count = rec.heading_oscillation_count;
         report.selected_reference_heading_oscillation_count =
             rec.reference_heading_oscillation_count;
+        const OptimizerSourceInfo source_info = optimizer.inspectSource(rec.traj);
+        report.selected_source_mode = source_info.source_mode;
+        report.selected_used_guard = source_info.used_guard;
+        report.selected_continuous_source_ok = source_info.continuous_source_ok;
         break;
       }
     }
@@ -640,6 +647,10 @@ int main(int argc, char** argv) {
             << " selected_heading_oscillations=" << report.selected_heading_oscillation_count
             << " selected_reference_heading_oscillations="
             << report.selected_reference_heading_oscillation_count
+            << " selected_source_mode=" << static_cast<int>(report.selected_source_mode)
+            << " selected_used_guard=" << (report.selected_used_guard ? 1 : 0)
+            << " selected_continuous_source_ok="
+            << (report.selected_continuous_source_ok ? 1 : 0)
             << "\n";
 
   if (report.topo_paths == 0) {
@@ -673,6 +684,14 @@ int main(int argc, char** argv) {
   if (report.selected_heading_oscillation_count >
       report.selected_reference_heading_oscillation_count) {
     std::cerr << "[test] FAIL: selected fixed-case trajectory adds extra heading oscillation beyond the accepted motion chain\n";
+    return 1;
+  }
+  if (report.selected_used_guard) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory still depends on guard output\n";
+    return 1;
+  }
+  if (!report.selected_continuous_source_ok) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory cannot yet prove a continuous optimizer source\n";
     return 1;
   }
 

@@ -22,6 +22,19 @@ struct OptimizerParams {
   double step_size = 0.005;           // gradient descent step size
 };
 
+enum class OptimizerSourceMode {
+  UNKNOWN,
+  CONTINUOUS,
+  POLYLINE_GUARD,
+  ROTATE_TRANSLATE_GUARD,
+};
+
+struct OptimizerSourceInfo {
+  OptimizerSourceMode source_mode = OptimizerSourceMode::UNKNOWN;
+  bool used_guard = true;
+  bool continuous_source_ok = false;
+};
+
 class TrajectoryOptimizer {
 public:
   TrajectoryOptimizer();
@@ -53,6 +66,10 @@ public:
                         double* max_vel = nullptr,
                         double* max_acc = nullptr,
                         double* max_yaw_rate = nullptr) const;
+
+  // Temporary source inspection API used by regression tests while the
+  // optimizer is still being refactored away from guard-based outputs.
+  OptimizerSourceInfo inspectSource(const Trajectory&) const { return {}; }
 
 private:
   const GridMap* map_ = nullptr;
