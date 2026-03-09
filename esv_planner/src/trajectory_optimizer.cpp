@@ -8,6 +8,10 @@ namespace esv_planner {
 
 namespace {
 
+constexpr double kShapeSampleStep = 0.05;
+constexpr double kMaxSegmentLengthRatio = 1.08;
+constexpr int kMaxSegmentHeadingOscillations = 1;
+
 double waypointChainClearance(const std::vector<SE2State>& waypoints,
                               const SvsdfEvaluator* svsdf) {
   if (!svsdf || waypoints.empty()) return kInf;
@@ -39,6 +43,91 @@ double continuousWaypointChainClearance(const std::vector<SE2State>& waypoints,
     }
   }
   return min_clearance;
+}
+
+double waypointChainLength(const std::vector<SE2State>& waypoints) {
+  if (waypoints.size() < 2) return 0.0;
+  double len = 0.0;
+  for (size_t i = 1; i < waypoints.size(); ++i) {
+    len += (waypoints[i].position() - waypoints[i - 1].position()).norm();
+  }
+  return len;
+}
+
+std::vector<Eigen::Vector2d> sampleTrajectoryPositions(const Trajectory& traj,
+                                                       double sample_step) {
+  std::vector<Eigen::Vector2d> pts;
+  if (traj.empty()) return pts;
+  const double total = traj.totalDuration();
+  const int n_steps = std::max(
+      1, static_cast<int>(std::ceil(total / std::max(sample_step, 1e-3))));
+  pts.reserve(static_cast<size_t>(n_steps) + 1);
+  for (int i = 0; i <= n_steps; ++i) {
+    const double t = (i == n_steps) ? total : std::min(total, i * sample_step);
+    pts.push_back(traj.sample(t).position());
+  }
+  return pts;
+}
+
+double sampledTrajectoryLength(const Trajectory& traj, double sample_step) {
+  const auto pts = sampleTrajectoryPositions(traj, sample_step);
+  if (pts.size() < 2) return 0.0;
+  double len = 0.0;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    len += (pts[i] - pts[i - 1]).norm();
+  }
+  return len;
+}
+
+int headingOscillationCount(const Trajectory& traj, double sample_step) {
+  const auto pts = sampleTrajectoryPositions(traj, sample_step);
+  if (pts.size() < 4) return 0;
+
+  std::vector<double> headings;
+  headings.reserve(pts.size() - 1);
+  for (size_t i = 1; i < pts.size(); ++i) {
+    const Eigen::Vector2d d = pts[i] - pts[i - 1];
+    if (d.norm() < 1e-4) continue;
+    headings.push_back(std::atan2(d.y(), d.x()));
+  }
+  if (headings.size() < 3) return 0;
+
+  constexpr double kTurnEps = 0.08;
+  int oscillations = 0;
+  int prev_sign = 0;
+  for (size_t i = 1; i < headings.size(); ++i) {
+    const double turn = normalizeAngle(headings[i] - headings[i - 1]);
+    if (std::abs(turn) < kTurnEps) continue;
+    const int sign = (turn > 0.0) ? 1 : -1;
+    if (prev_sign != 0 && sign != prev_sign) {
+      ++oscillations;
+    }
+    prev_sign = sign;
+  }
+  return oscillations;
+}
+
+bool trajectoryShapeAcceptable(const Trajectory& traj,
+                               const std::vector<SE2State>& waypoints) {
+  if (traj.empty()) return false;
+  const double ref_len = waypointChainLength(waypoints);
+  if (ref_len < 0.5) {
+    return true;
+  }
+
+  const double traj_len = sampledTrajectoryLength(traj, kShapeSampleStep);
+  const double length_ratio =
+      (ref_len > 1e-9) ? (traj_len / ref_len) : kInf;
+  if (length_ratio > kMaxSegmentLengthRatio) {
+    return false;
+  }
+
+  if (headingOscillationCount(traj, kShapeSampleStep) >
+      kMaxSegmentHeadingOscillations) {
+    return false;
+  }
+
+  return true;
 }
 
 double transitionClearance(const SE2State& from,
@@ -537,6 +626,22 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
     }
   }
 
+  if (!traj.empty() && !trajectoryShapeAcceptable(traj, waypoints)) {
+    Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
+    if (!conservative.empty() &&
+        trajectoryShapeAcceptable(conservative, waypoints) &&
+        (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
+      return conservative;
+    }
+
+    Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
+    if (!polyline.empty() &&
+        trajectoryShapeAcceptable(polyline, waypoints) &&
+        (!svsdf_ || svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0)) {
+      return polyline;
+    }
+  }
+
   return traj;
 }
 
@@ -697,6 +802,15 @@ Trajectory TrajectoryOptimizer::optimizeR2(
         return conservative;
       }
       return Trajectory();
+    }
+  }
+
+  if (!traj.empty() && !trajectoryShapeAcceptable(traj, waypoints)) {
+    Trajectory conservative = buildConservativePolylineTrajectory(waypoints, total_time);
+    if (!conservative.empty() &&
+        trajectoryShapeAcceptable(conservative, waypoints) &&
+        (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
+      return conservative;
     }
   }
   return traj;
