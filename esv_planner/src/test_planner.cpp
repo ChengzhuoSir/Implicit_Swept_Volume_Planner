@@ -356,14 +356,14 @@ int main(int argc, char** argv)
     for (size_t si = 0; si < segments.size(); ++si) {
       if (segments[si].risk != RiskLevel::HIGH) continue;
       Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-      if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
+      if (tr.empty()) {
         path_valid = false;
         break;
       }
       seg_trajs[si] = tr;
     }
     if (!path_valid) {
-      std::cout << "  [stage3] Path discarded: high-risk segment infeasible\n";
+      std::cout << "  [stage3] Path discarded: high-risk segment optimization failed\n";
       continue;
     }
 

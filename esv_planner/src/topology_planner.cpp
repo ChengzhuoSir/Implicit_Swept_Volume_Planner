@@ -562,15 +562,13 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
   for (auto& path : paths) {
     if (path.waypoints.size() <= 2) continue;
 
-    std::vector<TopoWaypoint> discrete = path.waypoints;
+    // Densify first so obstacle-adjacent segments are repaired at resolution scale.
+    std::vector<TopoWaypoint> discrete = discretizePath(path.waypoints, res);
     assignTangentYaw(discrete);
     for (size_t k = 1; k + 1 < discrete.size(); ++k) {
       TopoWaypoint adjusted = withIncomingYaw(discrete[k - 1], discrete[k]);
-      double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
-      if (esdf < safe_dist || !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
-        if (pushPointFromObstacle(adjusted, safe_dist)) {
-          discrete[k] = withIncomingYaw(discrete[k - 1], adjusted);
-        }
+      if (pushPointFromObstacle(adjusted, safe_dist)) {
+        discrete[k] = withIncomingYaw(discrete[k - 1], adjusted);
       }
     }
     assignTangentYaw(discrete);
@@ -643,11 +641,8 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
 
     for (size_t k = 1; k + 1 < result.size(); ++k) {
       TopoWaypoint adjusted = withIncomingYaw(result[k - 1], result[k]);
-      double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
-      if (esdf < safe_dist || !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
-        if (pushPointFromObstacle(adjusted, safe_dist)) {
-          result[k] = withIncomingYaw(result[k - 1], adjusted);
-        }
+      if (pushPointFromObstacle(adjusted, safe_dist)) {
+        result[k] = withIncomingYaw(result[k - 1], adjusted);
       }
     }
     assignTangentYaw(result);

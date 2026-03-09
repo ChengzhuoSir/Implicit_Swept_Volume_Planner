@@ -93,8 +93,47 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
   return states;
 }
 
+double SE2SequenceGenerator::footprintClearance(const SE2State& state) const {
+  const auto boundary = checker_->footprint().sampleBoundary(
+      state.yaw, map_->resolution() * 0.5);
+  if (boundary.empty()) {
+    return map_->getEsdf(state.x, state.y);
+  }
+
+  double min_dist = map_->getEsdf(state.x, state.y);
+  for (const auto& sample : boundary) {
+    const double dist = map_->getEsdf(state.x + sample.x(), state.y + sample.y());
+    min_dist = std::min(min_dist, dist);
+  }
+  return min_dist;
+}
+
+double SE2SequenceGenerator::requiredClearance() const {
+  return std::max(2.0 * map_->resolution(), 1e-3);
+}
+
+bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
+                                          const SE2State& to) const {
+  const double len = (to.position() - from.position()).norm();
+  const double sample_step = std::max(0.5 * map_->resolution(), 1e-3);
+  const int n_steps =
+      std::max(1, static_cast<int>(std::ceil(len / sample_step)));
+  for (int s = 0; s <= n_steps; ++s) {
+    const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+    SE2State st;
+    st.x = from.x + (to.x - from.x) * t;
+    st.y = from.y + (to.y - from.y) * t;
+    st.yaw = normalizeAngle(from.yaw + normalizeAngle(to.yaw - from.yaw) * t);
+    if (footprintClearance(st) < 0.0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool SE2SequenceGenerator::safeYaw(SE2State& state, double desired_yaw) {
   const int bins = checker_->numYawBins();
+  const double required_clearance = requiredClearance();
   const auto wrap_bin = [bins](int bin) {
     int wrapped = bin % bins;
     return wrapped < 0 ? wrapped + bins : wrapped;
@@ -102,16 +141,24 @@ bool SE2SequenceGenerator::safeYaw(SE2State& state, double desired_yaw) {
 
   int desired_bin = checker_->binFromYaw(desired_yaw);
   if (checker_->isYawSafe(state.x, state.y, desired_bin)) {
-    state.yaw = checker_->yawFromBin(desired_bin);
-    return true;
+    SE2State candidate = state;
+    candidate.yaw = checker_->yawFromBin(desired_bin);
+    if (footprintClearance(candidate) >= required_clearance) {
+      state = candidate;
+      return true;
+    }
   }
 
   for (int offset = 1; offset <= bins / 2; ++offset) {
     for (int sign : {-1, 1}) {
       const int bin = wrap_bin(desired_bin + sign * offset);
       if (checker_->isYawSafe(state.x, state.y, bin)) {
-        state.yaw = checker_->yawFromBin(bin);
-        return true;
+        SE2State candidate = state;
+        candidate.yaw = checker_->yawFromBin(bin);
+        if (footprintClearance(candidate) >= required_clearance) {
+          state = candidate;
+          return true;
+        }
       }
     }
   }
@@ -150,7 +197,7 @@ bool SE2SequenceGenerator::pushStateFromObstacle(SE2State& state,
         const int safe_count = static_cast<int>(
             checker_->safeYawIndices(nearby.x, nearby.y).size());
         const double yaw_penalty = std::abs(normalizeAngle(assigned.yaw - desired_yaw));
-        const double score = 0.6 * map_->getEsdf(nearby.x, nearby.y) +
+        const double score = 0.6 * footprintClearance(assigned) +
                              0.15 * static_cast<double>(safe_count) -
                              0.5 * radius - 0.1 * yaw_penalty;
         if (!found_nearby_safe || score > best_score) {
@@ -221,6 +268,19 @@ bool SE2SequenceGenerator::segAdjustRecursive(const std::vector<SE2State>& seed,
       break;
     }
     trial[i] = assigned;
+    if (!transitionSafe(trial[i - 1], trial[i])) {
+      fail_idx = i;
+      break;
+    }
+  }
+
+  if (fail_idx == trial.size()) {
+    for (size_t i = 1; i < trial.size(); ++i) {
+      if (!transitionSafe(trial[i - 1], trial[i])) {
+        fail_idx = i;
+        break;
+      }
+    }
   }
 
   if (fail_idx == trial.size()) {
@@ -274,6 +334,12 @@ bool SE2SequenceGenerator::repairShortWindow(const std::vector<SE2State>& seed,
     repaired[i] = assigned;
   }
 
+  for (size_t i = 1; i < repaired.size(); ++i) {
+    if (!transitionSafe(repaired[i - 1], repaired[i])) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -294,7 +360,10 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
   size_t i = 1;
   while (i + 1 < states.size()) {
     SE2State assigned = states[i];
-    if (safeYaw(assigned, states[i].yaw)) {
+    const bool yaw_ok = safeYaw(assigned, states[i].yaw);
+    const bool edge_ok = yaw_ok &&
+                         transitionSafe(current.waypoints.back(), assigned);
+    if (yaw_ok && edge_ok) {
       current.waypoints.push_back(assigned);
       ++i;
       continue;
@@ -303,7 +372,11 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     size_t next_safe_idx = i + 1;
     SE2State next_safe = states[next_safe_idx];
     bool found_next_anchor = false;
-    for (; next_safe_idx < states.size(); ++next_safe_idx) {
+    const bool edge_failure = yaw_ok && !edge_ok;
+    const size_t search_end = edge_failure
+        ? std::min(states.size() - 1, i + 2)
+        : states.size() - 1;
+    for (; next_safe_idx <= search_end; ++next_safe_idx) {
       next_safe = states[next_safe_idx];
       if (next_safe_idx == states.size() - 1) {
         found_next_anchor = true;
@@ -316,8 +389,17 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     }
 
     if (!found_next_anchor) {
-      next_safe_idx = states.size() - 1;
-      next_safe = states.back();
+      if (edge_failure) {
+        next_safe_idx = std::min(states.size() - 1, i + 1);
+        next_safe = states[next_safe_idx];
+        if (!safeYaw(next_safe, states[next_safe_idx].yaw) &&
+            next_safe_idx == states.size() - 1) {
+          next_safe = states.back();
+        }
+      } else {
+        next_safe_idx = states.size() - 1;
+        next_safe = states.back();
+      }
     }
 
     std::vector<SE2State> seed;
@@ -352,6 +434,24 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     MotionSegment high;
     high.risk = RiskLevel::HIGH;
     high.waypoints = seed;
+    for (int pass = 0; pass < 2; ++pass) {
+      for (size_t k = 1; k + 1 < high.waypoints.size(); ++k) {
+        SE2State candidate = high.waypoints[k];
+        bool ok = safeYaw(candidate, seed[k].yaw);
+        if (ok) {
+          ok = transitionSafe(high.waypoints[k - 1], candidate) &&
+               transitionSafe(candidate, high.waypoints[k + 1]);
+        }
+        if (!ok) {
+          candidate = high.waypoints[k];
+          if (pushStateFromObstacle(candidate, seed[k].yaw)) {
+            high.waypoints[k] = candidate;
+          }
+        } else {
+          high.waypoints[k] = candidate;
+        }
+      }
+    }
     segments.push_back(high);
 
     current = MotionSegment();

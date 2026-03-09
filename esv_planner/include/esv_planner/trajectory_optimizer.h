@@ -73,7 +73,7 @@ private:
                      std::vector<YawPolyPiece>& pieces);
 
   // Allocate time per segment based on distance
-  std::vector<double> allocateTime(const std::vector<SE2State>& wps, double total_time);
+  std::vector<double> allocateTime(const std::vector<SE2State>& wps, double total_time) const;
 
   // Compute total cost for a trajectory
   double computeCost(const Trajectory& traj, const std::vector<SE2State>& ref_wps,
@@ -87,6 +87,17 @@ private:
                      double* max_vel = nullptr,
                      double* max_acc = nullptr,
                      double* max_yaw_rate = nullptr) const;
+
+  // Conservative fallback that stays exactly on the discrete waypoint polyline.
+  Trajectory buildConservativePolylineTrajectory(
+      const std::vector<SE2State>& waypoints,
+      double total_time) const;
+
+  // More conservative SE(2) fallback: decouple in-place rotation from
+  // translation to avoid sweeping unsafe intermediate yaws through obstacles.
+  Trajectory buildRotateTranslateTrajectory(
+      const std::vector<SE2State>& waypoints,
+      double total_time) const;
 };
 
 }  // namespace esv_planner

@@ -147,6 +147,22 @@ target_link_libraries(test_esv_pipeline_maze
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_esv_fixed_case_regression
+  src/test_esv_fixed_case_regression.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_esv_fixed_case_regression
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_grid_map_esdf
   src/test_grid_map_esdf.cpp
   src/grid_map.cpp

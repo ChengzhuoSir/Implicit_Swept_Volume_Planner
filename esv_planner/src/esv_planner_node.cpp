@@ -349,7 +349,10 @@ private:
       }
 
       bool path_valid = true;
-      // First: high-risk SE(2) segments must be feasible, otherwise discard path.
+      // First: high-risk segments must produce a trajectory. We no longer
+      // discard a path solely because an intermediate SE(2) segment is locally
+      // conservative-negative; the final stitched trajectory remains the
+      // authoritative safety gate.
       for (size_t si = 0; si < segments.size(); ++si) {
         if (segments[si].risk != RiskLevel::HIGH) continue;
         Trajectory seg_traj = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
@@ -361,15 +364,13 @@ private:
         }
         ValidationReport seg_report = inspectTrajectory(seg_traj);
         if (seg_report.min_svsdf < 0.0) {
-          ROS_WARN("  Path %zu discarded: high-risk segment %zu infeasible: %s",
+          ROS_WARN("  Path %zu high-risk segment %zu remains locally infeasible before stitch: %s",
                    pi, si, formatValidation(seg_report).c_str());
-          path_valid = false;
-          break;
         }
         seg_trajs[si] = seg_traj;
       }
       if (!path_valid) {
-        ROS_WARN("  Path %zu discarded: high-risk SE(2) segment infeasible", pi);
+        ROS_WARN("  Path %zu discarded: high-risk SE(2) optimization failed", pi);
         continue;
       }
 

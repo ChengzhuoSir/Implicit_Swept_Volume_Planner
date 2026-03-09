@@ -34,6 +34,16 @@ private:
   // SafeYaw: assign collision-free yaw closest to desired
   bool safeYaw(SE2State& state, double desired_yaw);
 
+  // Conservative footprint clearance used to keep generator semantics aligned
+  // with the final continuous validation stage.
+  double footprintClearance(const SE2State& state) const;
+
+  // Required clearance used by SafeYaw and continuous edge validation.
+  double requiredClearance() const;
+
+  // Validate the continuous interpolated motion between two assigned states.
+  bool transitionSafe(const SE2State& from, const SE2State& to) const;
+
   // Push a colliding state toward larger ESDF, then re-run SafeYaw.
   bool pushStateFromObstacle(SE2State& state, double desired_yaw);
 

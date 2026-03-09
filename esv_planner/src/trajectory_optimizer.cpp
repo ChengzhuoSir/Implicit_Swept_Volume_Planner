@@ -6,6 +6,105 @@
 
 namespace esv_planner {
 
+namespace {
+
+double waypointChainClearance(const std::vector<SE2State>& waypoints,
+                              const SvsdfEvaluator* svsdf) {
+  if (!svsdf || waypoints.empty()) return kInf;
+  double min_clearance = kInf;
+  for (const auto& wp : waypoints) {
+    min_clearance = std::min(min_clearance, svsdf->evaluate(wp));
+  }
+  return min_clearance;
+}
+
+double continuousWaypointChainClearance(const std::vector<SE2State>& waypoints,
+                                        const SvsdfEvaluator* svsdf,
+                                        double sample_step) {
+  if (!svsdf || waypoints.empty()) return kInf;
+  double min_clearance = kInf;
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    const SE2State& a = waypoints[i];
+    const SE2State& b = waypoints[i + 1];
+    const double len = (b.position() - a.position()).norm();
+    const int n_steps = std::max(
+        1, static_cast<int>(std::ceil(len / std::max(sample_step, 1e-3))));
+    for (int s = 0; s <= n_steps; ++s) {
+      const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+      SE2State st;
+      st.x = a.x + (b.x - a.x) * t;
+      st.y = a.y + (b.y - a.y) * t;
+      st.yaw = normalizeAngle(a.yaw + normalizeAngle(b.yaw - a.yaw) * t);
+      min_clearance = std::min(min_clearance, svsdf->evaluate(st));
+    }
+  }
+  return min_clearance;
+}
+
+double transitionClearance(const SE2State& from,
+                           const SE2State& to,
+                           const SvsdfEvaluator* svsdf,
+                           double sample_step) {
+  if (!svsdf) return kInf;
+  const double len = (to.position() - from.position()).norm();
+  const int n_steps = std::max(
+      1, static_cast<int>(std::ceil(len / std::max(sample_step, 1e-3))));
+  double min_clearance = kInf;
+  for (int s = 0; s <= n_steps; ++s) {
+    const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+    SE2State st;
+    st.x = from.x + (to.x - from.x) * t;
+    st.y = from.y + (to.y - from.y) * t;
+    st.yaw = normalizeAngle(from.yaw + normalizeAngle(to.yaw - from.yaw) * t);
+    min_clearance = std::min(min_clearance, svsdf->evaluate(st));
+  }
+  return min_clearance;
+}
+
+double constantYawTranslationClearance(const SE2State& from,
+                                       const SE2State& to,
+                                       double yaw,
+                                       const SvsdfEvaluator* svsdf,
+                                       double sample_step) {
+  if (!svsdf) return kInf;
+  const double len = (to.position() - from.position()).norm();
+  const int n_steps = std::max(
+      1, static_cast<int>(std::ceil(len / std::max(sample_step, 1e-3))));
+  double min_clearance = kInf;
+  for (int s = 0; s <= n_steps; ++s) {
+    const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+    SE2State st;
+    st.x = from.x + (to.x - from.x) * t;
+    st.y = from.y + (to.y - from.y) * t;
+    st.yaw = yaw;
+    min_clearance = std::min(min_clearance, svsdf->evaluate(st));
+  }
+  return min_clearance;
+}
+
+double inPlaceRotationClearance(const Eigen::Vector2d& pos,
+                                double yaw0,
+                                double yaw1,
+                                const SvsdfEvaluator* svsdf,
+                                double sample_step) {
+  if (!svsdf) return kInf;
+  const double yaw_delta = std::abs(normalizeAngle(yaw1 - yaw0));
+  const int n_steps = std::max(
+      1, static_cast<int>(std::ceil(yaw_delta / std::max(sample_step, 1e-3))));
+  double min_clearance = kInf;
+  for (int s = 0; s <= n_steps; ++s) {
+    const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+    SE2State st;
+    st.x = pos.x();
+    st.y = pos.y();
+    st.yaw = normalizeAngle(yaw0 + normalizeAngle(yaw1 - yaw0) * t);
+    min_clearance = std::min(min_clearance, svsdf->evaluate(st));
+  }
+  return min_clearance;
+}
+
+}  // namespace
+
 TrajectoryOptimizer::TrajectoryOptimizer() {}
 
 void TrajectoryOptimizer::init(const GridMap& map, const SvsdfEvaluator& svsdf,
@@ -19,7 +118,7 @@ void TrajectoryOptimizer::init(const GridMap& map, const SvsdfEvaluator& svsdf,
 // allocateTime: distribute total_time proportional to segment distances
 // ---------------------------------------------------------------------------
 std::vector<double> TrajectoryOptimizer::allocateTime(
-    const std::vector<SE2State>& wps, double total_time) {
+    const std::vector<SE2State>& wps, double total_time) const {
   int n = static_cast<int>(wps.size()) - 1;
   std::vector<double> dists(n, 0.0);
   double total_dist = 0.0;
@@ -219,6 +318,59 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
   std::vector<SE2State> wps = waypoints;
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;
+  const double chain_clearance = continuousWaypointChainClearance(
+      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
+  if (svsdf_ && chain_clearance < 0.0) {
+    Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
+    if (!conservative.empty() &&
+        svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
+      return conservative;
+    }
+  }
+
+  if (svsdf_ && map_ && n_wps > 2 && chain_clearance < 0.0) {
+    const double sample_step = 0.5 * map_->resolution();
+    for (int pass = 0; pass < 8; ++pass) {
+      bool changed = false;
+      bool all_safe = true;
+      for (int i = 1; i < n_wps - 1; ++i) {
+        const double state_clearance = svsdf_->evaluate(wps[i]);
+        const double left_clearance =
+            transitionClearance(wps[i - 1], wps[i], svsdf_, sample_step);
+        const double right_clearance =
+            transitionClearance(wps[i], wps[i + 1], svsdf_, sample_step);
+        const double min_clearance =
+            std::min(state_clearance, std::min(left_clearance, right_clearance));
+        if (min_clearance >= 0.0) {
+          continue;
+        }
+
+        all_safe = false;
+        Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
+        double grad_yaw = 0.0;
+        svsdf_->gradient(wps[i], grad_pos, grad_yaw);
+        if (grad_pos.norm() < 1e-6) {
+          grad_pos = wps[i].position() -
+                     0.5 * (wps[i - 1].position() + wps[i + 1].position());
+        }
+        if (grad_pos.norm() < 1e-6) {
+          continue;
+        }
+
+        const Eigen::Vector2d dir = grad_pos.normalized();
+        const double push = std::max(map_->resolution(),
+                                     -min_clearance + map_->resolution());
+        wps[i].x += push * dir.x();
+        wps[i].y += push * dir.y();
+        wps[i].yaw = normalizeAngle(wps[i].yaw + 0.1 * grad_yaw);
+        changed = true;
+      }
+      if (all_safe || !changed) {
+        break;
+      }
+    }
+    durations = allocateTime(wps, total_time);
+  }
 
   for (int iter = 0; iter < params_.max_iterations; ++iter) {
     std::vector<Eigen::Vector2d> positions(n_wps);
@@ -318,7 +470,7 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
 
   // Downsample optimised waypoints for MINCO fitting.
   // Keep first, last, and every N-th point to avoid overfitting.
-  double min_piece_len = 1.5;  // minimum ~1.5m per MINCO piece
+  double min_piece_len = (chain_clearance <= params_.safety_margin + 0.02) ? 0.20 : 1.5;
   std::vector<Eigen::Vector2d> final_pos;
   std::vector<double> final_yaws;
   final_pos.push_back(Eigen::Vector2d(wps[0].x, wps[0].y));
@@ -365,7 +517,21 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
-  return retimeToDynamicLimits(traj);
+  traj = retimeToDynamicLimits(traj);
+
+  if (svsdf_ && !traj.empty()) {
+    const double traj_clearance = svsdf_->evaluateTrajectory(traj, 0.05);
+    if (chain_clearance >= 0.0 && traj_clearance < 0.0) {
+      Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
+      if (!conservative.empty() &&
+          svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
+        return conservative;
+      }
+      return buildConservativePolylineTrajectory(waypoints, total_time);
+    }
+  }
+
+  return traj;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +549,8 @@ Trajectory TrajectoryOptimizer::optimizeR2(
   std::vector<SE2State> ref = waypoints;
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;
+  const double chain_clearance = continuousWaypointChainClearance(
+      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
 
   for (int iter = 0; iter < params_.max_iterations; ++iter) {
     std::vector<Eigen::Vector2d> positions(n_wps);
@@ -468,7 +636,7 @@ Trajectory TrajectoryOptimizer::optimizeR2(
   }
 
   // Downsample: keep first, last, and points every ~0.5m
-  double min_piece_len = 0.5;
+  double min_piece_len = (chain_clearance <= params_.safety_margin + 0.02) ? 0.15 : 0.5;
   std::vector<Eigen::Vector2d> final_pos;
   std::vector<double> final_yaws;
   final_pos.push_back(all_pos[0]);
@@ -513,6 +681,12 @@ Trajectory TrajectoryOptimizer::optimizeR2(
                   Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
                   traj.pos_pieces);
   fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
+  if (svsdf_ && !traj.empty()) {
+    const double traj_clearance = svsdf_->evaluateTrajectory(traj, 0.05);
+    if (chain_clearance >= 0.0 && traj_clearance < 0.0) {
+      return buildConservativePolylineTrajectory(waypoints, total_time);
+    }
+  }
   return traj;
 }
 
@@ -531,6 +705,27 @@ Trajectory TrajectoryOptimizer::stitch(
   if (count == 0) return Trajectory();
   if (count == 1 && !optimized[0].empty()) {
     return retimeToDynamicLimits(optimized[0]);
+  }
+
+  // First try exact concatenation of already validated per-segment trajectories.
+  // This avoids re-fitting a new global polynomial through narrow passages.
+  Trajectory concatenated;
+  for (size_t i = 0; i < count; ++i) {
+    if (optimized[i].empty()) return Trajectory();
+    concatenated.pos_pieces.insert(concatenated.pos_pieces.end(),
+                                   optimized[i].pos_pieces.begin(),
+                                   optimized[i].pos_pieces.end());
+    concatenated.yaw_pieces.insert(concatenated.yaw_pieces.end(),
+                                   optimized[i].yaw_pieces.begin(),
+                                   optimized[i].yaw_pieces.end());
+  }
+  concatenated = retimeToDynamicLimits(concatenated);
+  if (!concatenated.empty()) {
+    const bool collision_free =
+        !svsdf_ || svsdf_->evaluateTrajectory(concatenated, 0.05) >= 0.0;
+    if (collision_free && dynamicsFeasible(concatenated)) {
+      return concatenated;
+    }
   }
 
   // Collect optimised waypoints by sampling per-segment trajectories
@@ -842,6 +1037,174 @@ bool TrajectoryOptimizer::checkDynamics(const Trajectory& traj,
   return max_vel <= params_.max_vel * 1.10 &&
          max_acc <= params_.max_acc * 1.10 &&
          max_yaw_rate <= params_.max_yaw_rate * 1.10;
+}
+
+Trajectory TrajectoryOptimizer::buildConservativePolylineTrajectory(
+    const std::vector<SE2State>& waypoints,
+    double total_time) const {
+  if (waypoints.size() < 2) return Trajectory();
+
+  std::vector<double> durations = allocateTime(waypoints, total_time);
+  if (durations.size() + 1 != waypoints.size()) return Trajectory();
+
+  Trajectory traj;
+  traj.pos_pieces.reserve(durations.size());
+  traj.yaw_pieces.reserve(durations.size());
+
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    const SE2State& a = waypoints[i];
+    const SE2State& b = waypoints[i + 1];
+    const double T = std::max(0.05, durations[i]);
+    const Eigen::Vector2d delta = b.position() - a.position();
+
+    PolyPiece pp;
+    pp.duration = T;
+    pp.coeffs.col(0) = a.position();
+    pp.coeffs.col(1).setZero();
+    pp.coeffs.col(2).setZero();
+    pp.coeffs.col(3) = delta * (10.0 / (T * T * T));
+    pp.coeffs.col(4) = delta * (-15.0 / (T * T * T * T));
+    pp.coeffs.col(5) = delta * (6.0 / (T * T * T * T * T));
+    traj.pos_pieces.push_back(pp);
+
+    const double yaw_delta = normalizeAngle(b.yaw - a.yaw);
+    YawPolyPiece yp;
+    yp.duration = T;
+    yp.coeffs(0, 0) = a.yaw;
+    yp.coeffs(0, 1) = 0.0;
+    yp.coeffs(0, 2) = 0.0;
+    yp.coeffs(0, 3) = 10.0 * yaw_delta / (T * T * T);
+    yp.coeffs(0, 4) = -15.0 * yaw_delta / (T * T * T * T);
+    yp.coeffs(0, 5) = 6.0 * yaw_delta / (T * T * T * T * T);
+    traj.yaw_pieces.push_back(yp);
+  }
+
+  return retimeToDynamicLimits(traj);
+}
+
+Trajectory TrajectoryOptimizer::buildRotateTranslateTrajectory(
+    const std::vector<SE2State>& waypoints,
+    double total_time) const {
+  if (waypoints.size() < 2) return Trajectory();
+
+  struct Primitive {
+    Eigen::Vector2d p0 = Eigen::Vector2d::Zero();
+    Eigen::Vector2d p1 = Eigen::Vector2d::Zero();
+    double yaw0 = 0.0;
+    double yaw1 = 0.0;
+    double duration = 0.1;
+    bool translate = false;
+  };
+
+  std::vector<Primitive> prims;
+  prims.reserve(waypoints.size() * 3);
+  const double pos_dt = std::max(0.10, params_.max_vel);
+  const double yaw_dt = std::max(0.10, params_.max_yaw_rate);
+  const double linear_sample = map_ ? 0.5 * map_->resolution() : 0.05;
+  const double yaw_sample = 0.1;
+
+  double current_yaw = waypoints.front().yaw;
+  double nominal_total = 0.0;
+
+  auto appendRotation = [&](const Eigen::Vector2d& pos, double from_yaw, double to_yaw) {
+    const double delta = std::abs(normalizeAngle(to_yaw - from_yaw));
+    if (delta < 1e-6) return;
+    Primitive prim;
+    prim.p0 = pos;
+    prim.p1 = pos;
+    prim.yaw0 = from_yaw;
+    prim.yaw1 = to_yaw;
+    prim.duration = std::max(0.05, delta / yaw_dt);
+    prim.translate = false;
+    nominal_total += prim.duration;
+    prims.push_back(prim);
+  };
+
+  auto appendTranslation = [&](const Eigen::Vector2d& from,
+                               const Eigen::Vector2d& to,
+                               double yaw) {
+    const double dist = (to - from).norm();
+    if (dist < 1e-9) return;
+    Primitive prim;
+    prim.p0 = from;
+    prim.p1 = to;
+    prim.yaw0 = yaw;
+    prim.yaw1 = yaw;
+    prim.duration = std::max(0.05, dist / pos_dt);
+    prim.translate = true;
+    nominal_total += prim.duration;
+    prims.push_back(prim);
+  };
+
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    const SE2State& a = waypoints[i];
+    const SE2State& b = waypoints[i + 1];
+
+    const double clearance_a = constantYawTranslationClearance(
+        a, b, a.yaw, svsdf_, linear_sample);
+    const double clearance_b = constantYawTranslationClearance(
+        a, b, b.yaw, svsdf_, linear_sample);
+    const double trans_yaw = (clearance_b > clearance_a) ? b.yaw : a.yaw;
+
+    if (inPlaceRotationClearance(a.position(), current_yaw, trans_yaw,
+                                 svsdf_, yaw_sample) < 0.0) {
+      return Trajectory();
+    }
+    appendRotation(a.position(), current_yaw, trans_yaw);
+    appendTranslation(a.position(), b.position(), trans_yaw);
+
+    if (inPlaceRotationClearance(b.position(), trans_yaw, b.yaw,
+                                 svsdf_, yaw_sample) < 0.0) {
+      return Trajectory();
+    }
+    appendRotation(b.position(), trans_yaw, b.yaw);
+    current_yaw = b.yaw;
+  }
+
+  if (prims.empty()) return Trajectory();
+
+  const double scale = (nominal_total > 1e-6) ? total_time / nominal_total : 1.0;
+  Trajectory traj;
+  traj.pos_pieces.reserve(prims.size());
+  traj.yaw_pieces.reserve(prims.size());
+
+  for (const Primitive& prim : prims) {
+    const double T = std::max(0.05, prim.duration * scale);
+
+    PolyPiece pp;
+    pp.duration = T;
+    pp.coeffs.col(0) = prim.p0;
+    pp.coeffs.col(1).setZero();
+    pp.coeffs.col(2).setZero();
+    if (prim.translate) {
+      const Eigen::Vector2d delta = prim.p1 - prim.p0;
+      pp.coeffs.col(3) = delta * (10.0 / (T * T * T));
+      pp.coeffs.col(4) = delta * (-15.0 / (T * T * T * T));
+      pp.coeffs.col(5) = delta * (6.0 / (T * T * T * T * T));
+    } else {
+      pp.coeffs.col(3).setZero();
+      pp.coeffs.col(4).setZero();
+      pp.coeffs.col(5).setZero();
+    }
+    traj.pos_pieces.push_back(pp);
+
+    YawPolyPiece yp;
+    yp.duration = T;
+    const double yaw_delta = normalizeAngle(prim.yaw1 - prim.yaw0);
+    yp.coeffs(0, 0) = prim.yaw0;
+    yp.coeffs(0, 1) = 0.0;
+    yp.coeffs(0, 2) = 0.0;
+    yp.coeffs(0, 3) = 10.0 * yaw_delta / (T * T * T);
+    yp.coeffs(0, 4) = -15.0 * yaw_delta / (T * T * T * T);
+    yp.coeffs(0, 5) = 6.0 * yaw_delta / (T * T * T * T * T);
+    traj.yaw_pieces.push_back(yp);
+  }
+
+  traj = retimeToDynamicLimits(traj);
+  if (svsdf_ && !traj.empty() && svsdf_->evaluateTrajectory(traj, 0.05) < 0.0) {
+    return Trajectory();
+  }
+  return traj;
 }
 
 }  // namespace esv_planner
