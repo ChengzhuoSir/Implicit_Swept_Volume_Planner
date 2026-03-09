@@ -123,6 +123,12 @@ private:
       const std::vector<SE2State>& waypoints,
       double total_time) const;
 
+  // Primary continuous builder for support-state optimization.
+  // Each piece follows the support-state chord exactly to preserve corridor shape.
+  Trajectory buildSupportStateContinuousTrajectory(
+      const std::vector<SE2State>& support_states,
+      double total_time) const;
+
   // More conservative SE(2) fallback: decouple in-place rotation from
   // translation to avoid sweeping unsafe intermediate yaws through obstacles.
   Trajectory buildRotateTranslateTrajectory(

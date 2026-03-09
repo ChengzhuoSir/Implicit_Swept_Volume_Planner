@@ -251,8 +251,14 @@ private:
       return;
     }
 
-    std::vector<Trajectory> candidates;
-    std::vector<std::vector<MotionSegment>> all_segments;
+    struct AcceptedCandidate {
+      Trajectory traj;
+      std::vector<MotionSegment> segments;
+      size_t high_risk_segments = 0;
+      double min_svsdf = -kInf;
+    };
+
+    std::vector<AcceptedCandidate> accepted;
 
     auto segmentLength = [](const std::vector<SE2State>& wps) {
       if (wps.size() < 2) return 0.0;
@@ -453,17 +459,46 @@ private:
                    "(min_svsdf=%.3f < %.3f).",
                    pi, full_report.min_svsdf, opt_params_.safety_margin);
         }
-        candidates.push_back(full);
-        all_segments.push_back(segments);
+        size_t accepted_high = 0;
+        for (const auto& seg : segments) {
+          if (seg.risk == RiskLevel::HIGH) {
+            ++accepted_high;
+          }
+        }
+        accepted.push_back({full, segments, accepted_high, full_report.min_svsdf});
       } else {
         ROS_WARN("  Path %zu discarded after validation/fallback", pi);
       }
     }
 
-    if (candidates.empty()) {
+    if (accepted.empty()) {
       ROS_WARN("No valid trajectories generated!");
       handleEsvFailure("ESV candidate set empty after strict validation.", topo_paths);
       return;
+    }
+
+    std::sort(accepted.begin(), accepted.end(),
+              [](const AcceptedCandidate& a, const AcceptedCandidate& b) {
+                if (a.high_risk_segments != b.high_risk_segments) {
+                  return a.high_risk_segments < b.high_risk_segments;
+                }
+                if (std::abs(a.min_svsdf - b.min_svsdf) > 1e-6) {
+                  return a.min_svsdf > b.min_svsdf;
+                }
+                return a.traj.totalDuration() < b.traj.totalDuration();
+              });
+    if (accepted.size() > 2) {
+      ROS_INFO("Pruned accepted ESV pool from %zu to 2 candidates", accepted.size());
+      accepted.resize(2);
+    }
+
+    std::vector<Trajectory> candidates;
+    std::vector<std::vector<MotionSegment>> all_segments;
+    candidates.reserve(accepted.size());
+    all_segments.reserve(accepted.size());
+    for (const auto& candidate : accepted) {
+      candidates.push_back(candidate.traj);
+      all_segments.push_back(candidate.segments);
     }
 
     Trajectory best = optimizer_.selectBest(candidates);

@@ -221,7 +221,13 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
                               int& accepted_candidates,
                               int& total_high_risk_segments,
                               int& accepted_high_risk_segments) {
-  std::vector<Trajectory> candidates;
+  struct AcceptedCandidate {
+    Trajectory traj;
+    int high_risk_segments = 0;
+    double min_svsdf = -kInf;
+  };
+
+  std::vector<AcceptedCandidate> accepted;
   accepted_candidates = 0;
   total_high_risk_segments = 0;
   accepted_high_risk_segments = 0;
@@ -330,16 +336,36 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
     }
 
     if (valid) {
-      candidates.push_back(full);
-      ++accepted_candidates;
-      accepted_high_risk_segments += path_high_risk_segments;
+      accepted.push_back({full, path_high_risk_segments, full_clearance});
       std::cout << "[test]   path=" << path_idx << " accepted\n";
     } else {
       std::cout << "[test]   path=" << path_idx << " rejected\n";
     }
   }
 
-  if (candidates.empty()) return Trajectory();
+  if (accepted.empty()) return Trajectory();
+
+  std::sort(accepted.begin(), accepted.end(),
+            [](const AcceptedCandidate& a, const AcceptedCandidate& b) {
+              if (a.high_risk_segments != b.high_risk_segments) {
+                return a.high_risk_segments < b.high_risk_segments;
+              }
+              if (std::abs(a.min_svsdf - b.min_svsdf) > 1e-6) {
+                return a.min_svsdf > b.min_svsdf;
+              }
+              return a.traj.totalDuration() < b.traj.totalDuration();
+            });
+
+  const size_t retained_count = std::min<size_t>(2, accepted.size());
+  std::vector<Trajectory> candidates;
+  candidates.reserve(retained_count);
+  accepted_candidates = static_cast<int>(retained_count);
+  accepted_high_risk_segments = 0;
+  for (size_t i = 0; i < retained_count; ++i) {
+    candidates.push_back(accepted[i].traj);
+    accepted_high_risk_segments += accepted[i].high_risk_segments;
+  }
+
   return optimizer.selectBest(candidates);
 }
 

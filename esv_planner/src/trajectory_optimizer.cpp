@@ -130,6 +130,43 @@ bool trajectoryShapeAcceptable(const Trajectory& traj,
   return true;
 }
 
+bool trajectoryCollisionFree(const Trajectory& traj,
+                             const SvsdfEvaluator* svsdf,
+                             double* min_svsdf = nullptr) {
+  if (traj.empty()) return false;
+  if (!svsdf) {
+    if (min_svsdf) *min_svsdf = kInf;
+    return true;
+  }
+
+  const double clearance = svsdf->evaluateTrajectory(traj, 0.05);
+  if (min_svsdf) *min_svsdf = clearance;
+  return clearance >= 0.0;
+}
+
+std::vector<SE2State> extractSupportStates(const std::vector<SE2State>& waypoints,
+                                           double min_spacing) {
+  if (waypoints.size() <= 2) return waypoints;
+
+  std::vector<SE2State> support;
+  support.reserve(waypoints.size());
+  support.push_back(waypoints.front());
+  double accum = 0.0;
+  for (size_t i = 1; i + 1 < waypoints.size(); ++i) {
+    accum += (waypoints[i].position() - waypoints[i - 1].position()).norm();
+    const double yaw_jump =
+        std::abs(normalizeAngle(waypoints[i + 1].yaw - waypoints[i - 1].yaw));
+    if (accum >= min_spacing || yaw_jump > 0.35) {
+      support.push_back(waypoints[i]);
+      accum = 0.0;
+    }
+  }
+  if ((waypoints.back().position() - support.back().position()).norm() > 1e-9) {
+    support.push_back(waypoints.back());
+  }
+  return support;
+}
+
 double transitionClearance(const SE2State& from,
                            const SE2State& to,
                            const SvsdfEvaluator* svsdf,
@@ -401,7 +438,11 @@ void TrajectoryOptimizer::fitYawQuintic(
 OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
-  int n_wps = static_cast<int>(waypoints.size());
+  const double chain_clearance = continuousWaypointChainClearance(
+      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
+  const double support_spacing = 0.01;
+  std::vector<SE2State> wps = extractSupportStates(waypoints, support_spacing);
+  int n_wps = static_cast<int>(wps.size());
   auto buildResult = [&](const Trajectory& t, OptimizerSourceMode mode) {
     OptimizerResult result;
     result.success = !t.empty();
@@ -422,22 +463,36 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
 
   if (n_wps < 2) return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 
-  std::vector<SE2State> wps = waypoints;
+  auto buildPrimaryResult = [&](const std::vector<SE2State>& states) {
+    OptimizerResult best;
+
+    auto consider = [&](const Trajectory& cand) {
+      double min_svsdf = -kInf;
+      if (!trajectoryCollisionFree(cand, svsdf_, &min_svsdf)) {
+        return;
+      }
+      OptimizerResult result = buildResult(cand, OptimizerSourceMode::CONTINUOUS);
+      result.min_svsdf = min_svsdf;
+      if (!best.success ||
+          result.min_svsdf > best.min_svsdf + 1e-6 ||
+          (std::abs(result.min_svsdf - best.min_svsdf) <= 1e-6 &&
+           result.cost < best.cost)) {
+        best = result;
+      }
+    };
+
+    consider(buildSupportStateContinuousTrajectory(states, total_time));
+    consider(buildRotateTranslateTrajectory(states, total_time));
+    return best;
+  };
+
+  const OptimizerResult reference_result = buildPrimaryResult(waypoints);
+
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;
-  const double chain_clearance = continuousWaypointChainClearance(
-      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
   if (svsdf_ && chain_clearance < 0.0) {
-    Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
-    if (!conservative.empty() &&
-        svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-      return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
-    }
-
-    Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
-    if (!polyline.empty() &&
-        svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0) {
-      return buildResult(polyline, OptimizerSourceMode::POLYLINE_GUARD);
+    if (reference_result.success) {
+      return reference_result;
     }
   }
 
@@ -484,6 +539,8 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     }
     durations = allocateTime(wps, total_time);
   }
+  const std::vector<SE2State> repaired_wps = wps;
+  const OptimizerResult repaired_result = buildPrimaryResult(repaired_wps);
 
   for (int iter = 0; iter < params_.max_iterations; ++iter) {
     std::vector<Eigen::Vector2d> positions(n_wps);
@@ -581,87 +638,29 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     if (total_grad_norm < 1e-10) break;
   }
 
-  // Downsample optimised waypoints for MINCO fitting.
-  // Keep first, last, and every N-th point to avoid overfitting.
-  double min_piece_len = (chain_clearance <= params_.safety_margin + 0.02) ? 0.20 : 1.5;
-  std::vector<Eigen::Vector2d> final_pos;
-  std::vector<double> final_yaws;
-  final_pos.push_back(Eigen::Vector2d(wps[0].x, wps[0].y));
-  final_yaws.push_back(wps[0].yaw);
+  const OptimizerResult optimized_result = buildPrimaryResult(wps);
+  auto pickPreferred = [&](const OptimizerResult& incumbent,
+                           const OptimizerResult& candidate) {
+    if (!candidate.success) return incumbent;
+    if (!incumbent.success) return candidate;
 
-  double accum_dist = 0.0;
-  for (int i = 1; i < n_wps; ++i) {
-    double dx = wps[i].x - wps[i - 1].x;
-    double dy = wps[i].y - wps[i - 1].y;
-    accum_dist += std::sqrt(dx * dx + dy * dy);
-    if (accum_dist >= min_piece_len || i == n_wps - 1) {
-      final_pos.push_back(Eigen::Vector2d(wps[i].x, wps[i].y));
-      final_yaws.push_back(wps[i].yaw);
-      accum_dist = 0.0;
-    }
+    const bool no_worse_clearance =
+        candidate.min_svsdf + 1e-6 >= incumbent.min_svsdf;
+    const bool lower_cost = candidate.cost + 1e-6 < incumbent.cost;
+    const bool keep_shape =
+        trajectoryShapeAcceptable(candidate.traj, waypoints);
+    return (no_worse_clearance && lower_cost && keep_shape)
+               ? candidate
+               : incumbent;
+  };
+
+  OptimizerResult selected = reference_result;
+  selected = pickPreferred(selected, repaired_result);
+  selected = pickPreferred(selected, optimized_result);
+  if (selected.success) {
+    return selected;
   }
-
-  std::vector<SE2State> ds_wps(final_pos.size());
-  for (size_t i = 0; i < final_pos.size(); ++i) {
-    ds_wps[i] = SE2State(final_pos[i].x(), final_pos[i].y(), final_yaws[i]);
-  }
-  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
-
-  // Estimate boundary velocities from waypoint direction (not zero!)
-  Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
-  Eigen::Vector2d vf = Eigen::Vector2d::Zero();
-  if (final_pos.size() >= 2) {
-    double dt0 = ds_durations.empty() ? 1.0 : ds_durations[0];
-    if (dt0 < 0.1) dt0 = 0.1;
-    v0 = (final_pos[1] - final_pos[0]) / dt0;
-    double v0n = v0.norm();
-    if (v0n > params_.max_vel) v0 *= params_.max_vel / v0n;
-
-    double dtf = ds_durations.empty() ? 1.0 : ds_durations.back();
-    if (dtf < 0.1) dtf = 0.1;
-    vf = (final_pos.back() - final_pos[final_pos.size() - 2]) / dtf;
-    double vfn = vf.norm();
-    if (vfn > params_.max_vel) vf *= params_.max_vel / vfn;
-  }
-
-  Trajectory traj;
-  fitMincoQuintic(final_pos, ds_durations,
-                  v0, vf,
-                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
-                  traj.pos_pieces);
-  fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
-  traj = retimeToDynamicLimits(traj);
-
-  if (svsdf_ && !traj.empty()) {
-    const double traj_clearance = svsdf_->evaluateTrajectory(traj, 0.05);
-    if (chain_clearance >= 0.0 && traj_clearance < 0.0) {
-      Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
-      if (!conservative.empty() &&
-          svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-        return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
-      }
-      return buildResult(buildConservativePolylineTrajectory(waypoints, total_time),
-                         OptimizerSourceMode::POLYLINE_GUARD);
-    }
-  }
-
-  if (!traj.empty() && !trajectoryShapeAcceptable(traj, waypoints)) {
-    Trajectory conservative = buildRotateTranslateTrajectory(waypoints, total_time);
-    if (!conservative.empty() &&
-        trajectoryShapeAcceptable(conservative, waypoints) &&
-        (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
-      return buildResult(conservative, OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
-    }
-
-    Trajectory polyline = buildConservativePolylineTrajectory(waypoints, total_time);
-    if (!polyline.empty() &&
-        trajectoryShapeAcceptable(polyline, waypoints) &&
-        (!svsdf_ || svsdf_->evaluateTrajectory(polyline, 0.05) >= 0.0)) {
-      return buildResult(polyline, OptimizerSourceMode::POLYLINE_GUARD);
-    }
-  }
-
-  return buildResult(traj, OptimizerSourceMode::CONTINUOUS);
+  return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 }
 
 Trajectory TrajectoryOptimizer::optimizeSE2(
@@ -677,7 +676,11 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
 OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
-  int n_wps = static_cast<int>(waypoints.size());
+  const double chain_clearance = continuousWaypointChainClearance(
+      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
+  const double support_spacing = 0.01;
+  std::vector<SE2State> wps = extractSupportStates(waypoints, support_spacing);
+  int n_wps = static_cast<int>(wps.size());
   auto buildResult = [&](const Trajectory& t, OptimizerSourceMode mode) {
     OptimizerResult result;
     result.success = !t.empty();
@@ -698,12 +701,21 @@ OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
 
   if (n_wps < 2) return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 
-  std::vector<SE2State> wps = waypoints;
-  std::vector<SE2State> ref = waypoints;
+  std::vector<SE2State> ref = wps;
+  auto buildPrimaryResult = [&](const std::vector<SE2State>& states) {
+    const Trajectory traj = buildSupportStateContinuousTrajectory(states, total_time);
+    double min_svsdf = -kInf;
+    if (!trajectoryCollisionFree(traj, svsdf_, &min_svsdf)) {
+      return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
+    }
+    OptimizerResult result = buildResult(traj, OptimizerSourceMode::CONTINUOUS);
+    result.min_svsdf = min_svsdf;
+    return result;
+  };
+  const OptimizerResult reference_result = buildPrimaryResult(ref);
+
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;
-  const double chain_clearance = continuousWaypointChainClearance(
-      waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
 
   for (int iter = 0; iter < params_.max_iterations; ++iter) {
     std::vector<Eigen::Vector2d> positions(n_wps);
@@ -771,91 +783,27 @@ OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     if (total_grad_norm < 1e-10) break;
   }
 
-  // Derive yaw from velocity direction, then downsample for MINCO.
-  std::vector<Eigen::Vector2d> all_pos(n_wps);
-  std::vector<double> all_yaws(n_wps);
-  for (int i = 0; i < n_wps; ++i) {
-    all_pos[i] = Eigen::Vector2d(wps[i].x, wps[i].y);
-  }
-  all_yaws[0] = wps[0].yaw;
-  all_yaws[n_wps - 1] = wps[n_wps - 1].yaw;
   for (int i = 1; i < n_wps - 1; ++i) {
-    Eigen::Vector2d vel_dir = all_pos[i + 1] - all_pos[i - 1];
+    Eigen::Vector2d vel_dir = wps[i + 1].position() - wps[i - 1].position();
     if (vel_dir.norm() > 1e-9) {
-      all_yaws[i] = std::atan2(vel_dir.y(), vel_dir.x());
-    } else {
-      all_yaws[i] = all_yaws[i - 1];
+      wps[i].yaw = std::atan2(vel_dir.y(), vel_dir.x());
     }
   }
 
-  // Downsample: keep first, last, and points every ~0.5m
-  double min_piece_len = (chain_clearance <= params_.safety_margin + 0.02) ? 0.15 : 0.5;
-  std::vector<Eigen::Vector2d> final_pos;
-  std::vector<double> final_yaws;
-  final_pos.push_back(all_pos[0]);
-  final_yaws.push_back(all_yaws[0]);
-
-  double accum_dist = 0.0;
-  for (int i = 1; i < n_wps; ++i) {
-    accum_dist += (all_pos[i] - all_pos[i - 1]).norm();
-    if (accum_dist >= min_piece_len || i == n_wps - 1) {
-      final_pos.push_back(all_pos[i]);
-      final_yaws.push_back(all_yaws[i]);
-      accum_dist = 0.0;
-    }
+  const OptimizerResult optimized_result = buildPrimaryResult(wps);
+  if (optimized_result.success && reference_result.success) {
+    const bool no_worse_clearance =
+        optimized_result.min_svsdf + 1e-6 >= reference_result.min_svsdf;
+    const bool lower_cost = optimized_result.cost + 1e-6 < reference_result.cost;
+    const bool keep_shape =
+        trajectoryShapeAcceptable(optimized_result.traj, waypoints);
+    return (no_worse_clearance && lower_cost && keep_shape)
+               ? optimized_result
+               : reference_result;
   }
-
-  std::vector<SE2State> ds_wps(final_pos.size());
-  for (size_t i = 0; i < final_pos.size(); ++i) {
-    ds_wps[i] = SE2State(final_pos[i].x(), final_pos[i].y(), final_yaws[i]);
-  }
-  std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
-
-  // Estimate boundary velocities from waypoint direction
-  Eigen::Vector2d v0r = Eigen::Vector2d::Zero();
-  Eigen::Vector2d vfr = Eigen::Vector2d::Zero();
-  if (final_pos.size() >= 2) {
-    double dt0 = ds_durations.empty() ? 1.0 : ds_durations[0];
-    if (dt0 < 0.1) dt0 = 0.1;
-    v0r = (final_pos[1] - final_pos[0]) / dt0;
-    double v0n = v0r.norm();
-    if (v0n > params_.max_vel) v0r *= params_.max_vel / v0n;
-
-    double dtf = ds_durations.empty() ? 1.0 : ds_durations.back();
-    if (dtf < 0.1) dtf = 0.1;
-    vfr = (final_pos.back() - final_pos[final_pos.size() - 2]) / dtf;
-    double vfn = vfr.norm();
-    if (vfn > params_.max_vel) vfr *= params_.max_vel / vfn;
-  }
-
-  Trajectory traj;
-  fitMincoQuintic(final_pos, ds_durations,
-                  v0r, vfr,
-                  Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
-                  traj.pos_pieces);
-  fitYawQuintic(final_yaws, ds_durations, 0.0, 0.0, traj.yaw_pieces);
-  traj = retimeToDynamicLimits(traj);
-  if (svsdf_ && !traj.empty()) {
-    const double traj_clearance = svsdf_->evaluateTrajectory(traj, 0.05);
-    if (traj_clearance < 0.0) {
-      Trajectory conservative = buildConservativePolylineTrajectory(waypoints, total_time);
-      if (!conservative.empty() &&
-          svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0) {
-        return buildResult(conservative, OptimizerSourceMode::POLYLINE_GUARD);
-      }
-      return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
-    }
-  }
-
-  if (!traj.empty() && !trajectoryShapeAcceptable(traj, waypoints)) {
-    Trajectory conservative = buildConservativePolylineTrajectory(waypoints, total_time);
-    if (!conservative.empty() &&
-        trajectoryShapeAcceptable(conservative, waypoints) &&
-        (!svsdf_ || svsdf_->evaluateTrajectory(conservative, 0.05) >= 0.0)) {
-      return buildResult(conservative, OptimizerSourceMode::POLYLINE_GUARD);
-    }
-  }
-  return buildResult(traj, OptimizerSourceMode::CONTINUOUS);
+  if (optimized_result.success) return optimized_result;
+  if (reference_result.success) return reference_result;
+  return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 }
 
 Trajectory TrajectoryOptimizer::optimizeR2(
@@ -1255,6 +1203,49 @@ Trajectory TrajectoryOptimizer::buildConservativePolylineTrajectory(
   return retimeToDynamicLimits(traj);
 }
 
+Trajectory TrajectoryOptimizer::buildSupportStateContinuousTrajectory(
+    const std::vector<SE2State>& support_states,
+    double total_time) const {
+  if (support_states.size() < 2) return Trajectory();
+
+  std::vector<double> durations = allocateTime(support_states, total_time);
+  if (durations.size() + 1 != support_states.size()) return Trajectory();
+
+  Trajectory traj;
+  traj.pos_pieces.reserve(durations.size());
+  traj.yaw_pieces.reserve(durations.size());
+
+  for (size_t i = 0; i + 1 < support_states.size(); ++i) {
+    const SE2State& a = support_states[i];
+    const SE2State& b = support_states[i + 1];
+    const double T = std::max(0.05, durations[i]);
+    const Eigen::Vector2d delta = b.position() - a.position();
+
+    PolyPiece pp;
+    pp.duration = T;
+    pp.coeffs.col(0) = a.position();
+    pp.coeffs.col(1) = delta / T;
+    pp.coeffs.col(2).setZero();
+    pp.coeffs.col(3).setZero();
+    pp.coeffs.col(4).setZero();
+    pp.coeffs.col(5).setZero();
+    traj.pos_pieces.push_back(pp);
+
+    const double yaw_delta = normalizeAngle(b.yaw - a.yaw);
+    YawPolyPiece yp;
+    yp.duration = T;
+    yp.coeffs(0, 0) = a.yaw;
+    yp.coeffs(0, 1) = yaw_delta / T;
+    yp.coeffs(0, 2) = 0.0;
+    yp.coeffs(0, 3) = 0.0;
+    yp.coeffs(0, 4) = 0.0;
+    yp.coeffs(0, 5) = 0.0;
+    traj.yaw_pieces.push_back(yp);
+  }
+
+  return retimeToDynamicLimits(traj);
+}
+
 Trajectory TrajectoryOptimizer::buildRotateTranslateTrajectory(
     const std::vector<SE2State>& waypoints,
     double total_time) const {
@@ -1309,27 +1300,59 @@ Trajectory TrajectoryOptimizer::buildRotateTranslateTrajectory(
     prims.push_back(prim);
   };
 
+  auto bestTranslationYaw = [&](const SE2State& a,
+                                const SE2State& b,
+                                double from_yaw,
+                                double& out_yaw) {
+    double best_clearance = -kInf;
+    double best_yaw = a.yaw;
+    std::vector<double> candidates = {
+        a.yaw,
+        b.yaw,
+        from_yaw,
+        std::atan2((b.y - a.y), (b.x - a.x))
+    };
+    constexpr int kYawSamples = 36;
+    for (int i = 0; i < kYawSamples; ++i) {
+      candidates.push_back(-M_PI + (2.0 * M_PI * static_cast<double>(i)) /
+                                       static_cast<double>(kYawSamples));
+    }
+
+    for (double cand_yaw : candidates) {
+      const double rot_in = inPlaceRotationClearance(
+          a.position(), from_yaw, cand_yaw, svsdf_, yaw_sample);
+      if (rot_in < 0.0) continue;
+      const double trans = constantYawTranslationClearance(
+          a, b, cand_yaw, svsdf_, linear_sample);
+      if (trans < 0.0) continue;
+      const double rot_out = inPlaceRotationClearance(
+          b.position(), cand_yaw, b.yaw, svsdf_, yaw_sample);
+      if (rot_out < 0.0) continue;
+
+      const double overall = std::min(rot_in, std::min(trans, rot_out));
+      if (overall > best_clearance) {
+        best_clearance = overall;
+        best_yaw = cand_yaw;
+      }
+    }
+
+    if (best_clearance < 0.0) {
+      return false;
+    }
+    out_yaw = best_yaw;
+    return true;
+  };
+
   for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
     const SE2State& a = waypoints[i];
     const SE2State& b = waypoints[i + 1];
 
-    const double clearance_a = constantYawTranslationClearance(
-        a, b, a.yaw, svsdf_, linear_sample);
-    const double clearance_b = constantYawTranslationClearance(
-        a, b, b.yaw, svsdf_, linear_sample);
-    const double trans_yaw = (clearance_b > clearance_a) ? b.yaw : a.yaw;
-
-    if (inPlaceRotationClearance(a.position(), current_yaw, trans_yaw,
-                                 svsdf_, yaw_sample) < 0.0) {
+    double trans_yaw = current_yaw;
+    if (!bestTranslationYaw(a, b, current_yaw, trans_yaw)) {
       return Trajectory();
     }
     appendRotation(a.position(), current_yaw, trans_yaw);
     appendTranslation(a.position(), b.position(), trans_yaw);
-
-    if (inPlaceRotationClearance(b.position(), trans_yaw, b.yaw,
-                                 svsdf_, yaw_sample) < 0.0) {
-      return Trajectory();
-    }
     appendRotation(b.position(), trans_yaw, b.yaw);
     current_yaw = b.yaw;
   }

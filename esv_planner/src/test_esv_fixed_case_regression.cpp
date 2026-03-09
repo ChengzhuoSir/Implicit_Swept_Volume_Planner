@@ -493,6 +493,8 @@ FixedCaseReport runFixedCase() {
               std::max(report.best_segment_optimized_clearance, min_svsdf);
         }
         std::cout << "[test]     se2_clearance=" << min_svsdf
+                  << " source_mode=" << static_cast<int>(opt_result.source_info.source_mode)
+                  << " used_guard=" << (opt_result.source_info.used_guard ? 1 : 0)
                   << " traj_empty=" << (tr.empty() ? 1 : 0) << "\n";
         if (tr.empty()) {
           path_ok = false;
@@ -516,6 +518,8 @@ FixedCaseReport runFixedCase() {
               std::max(report.best_segment_optimized_clearance, min_svsdf);
         }
         std::cout << "[test]     r2_clearance=" << min_svsdf
+                  << " source_mode=" << static_cast<int>(opt_result.source_info.source_mode)
+                  << " used_guard=" << (opt_result.source_info.used_guard ? 1 : 0)
                   << " traj_empty=" << (tr.empty() ? 1 : 0) << "\n";
       }
 
