@@ -76,7 +76,7 @@ Visualization Manager:
       Buffer Length: 1
       Class: rviz/Path
       Color: 255; 0; 255
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -106,7 +106,7 @@ Visualization Manager:
         segments: false
         start_goal: false
         topo_paths: false
-        traj_astar: true
+        traj_astar: false
         waypoints: false
       Queue Size: 100
       Value: true

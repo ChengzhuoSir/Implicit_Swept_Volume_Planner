@@ -120,6 +120,59 @@ double continuousChainClearance(const std::vector<SE2State>& waypoints,
   return min_clearance;
 }
 
+std::vector<SE2State> sampleTrajectoryStates(const Trajectory& traj, double sample_step) {
+  std::vector<SE2State> states;
+  if (traj.empty()) return states;
+  const double total = traj.totalDuration();
+  const int n_steps =
+      std::max(1, static_cast<int>(std::ceil(total / std::max(1e-3, sample_step))));
+  states.reserve(static_cast<size_t>(n_steps) + 1);
+  for (int i = 0; i <= n_steps; ++i) {
+    const double t = (i == n_steps) ? total : std::min(total, i * sample_step);
+    states.push_back(traj.sample(t));
+  }
+  return states;
+}
+
+double pointToSegmentDistance(const Eigen::Vector2d& p,
+                              const Eigen::Vector2d& a,
+                              const Eigen::Vector2d& b) {
+  const Eigen::Vector2d ab = b - a;
+  const double denom = ab.squaredNorm();
+  if (denom < 1e-12) return (p - a).norm();
+  const double t = std::max(0.0, std::min(1.0, (p - a).dot(ab) / denom));
+  const Eigen::Vector2d proj = a + t * ab;
+  return (p - proj).norm();
+}
+
+double maxNearObstacleWaviness(const Trajectory& traj,
+                               const SvsdfEvaluator& svsdf,
+                               double clearance_threshold,
+                               double sample_step,
+                               int* out_samples = nullptr) {
+  const auto states = sampleTrajectoryStates(traj, sample_step);
+  if (states.size() < 3) {
+    if (out_samples) *out_samples = 0;
+    return 0.0;
+  }
+
+  int samples = 0;
+  double max_waviness = 0.0;
+  for (size_t i = 1; i + 1 < states.size(); ++i) {
+    const double c0 = svsdf.evaluate(states[i - 1]);
+    const double c1 = svsdf.evaluate(states[i]);
+    const double c2 = svsdf.evaluate(states[i + 1]);
+    if (std::min(c0, std::min(c1, c2)) > clearance_threshold) {
+      continue;
+    }
+    ++samples;
+    max_waviness = std::max(max_waviness, pointToSegmentDistance(
+        states[i].position(), states[i - 1].position(), states[i + 1].position()));
+  }
+  if (out_samples) *out_samples = samples;
+  return max_waviness;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -261,9 +314,17 @@ int main(int argc, char** argv) {
   const auto t_stitch_end = Clock::now();
   const double stitched_clearance =
       stitched.empty() ? -kInf : svsdf.evaluateTrajectory(stitched, 0.05);
+  int near_obstacle_samples = 0;
+  const double near_obstacle_waviness =
+      stitched.empty()
+          ? kInf
+          : maxNearObstacleWaviness(stitched, svsdf, params.safety_margin + 0.08,
+                                    0.05, &near_obstacle_samples);
   std::cout << "[test] path=" << path_idx
             << " stitched_success=" << (!stitched.empty() ? 1 : 0)
             << " stitched_clearance=" << stitched_clearance
+            << " near_obstacle_waviness=" << near_obstacle_waviness
+            << " near_obstacle_samples=" << near_obstacle_samples
             << " elapsed_ms="
             << std::chrono::duration_cast<std::chrono::milliseconds>(
                    t_stitch_end - t_stitch_begin)

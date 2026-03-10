@@ -253,3 +253,12 @@ target_link_libraries(test_planner_trigger_state
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
+
+add_executable(test_trajectory_spatial_sampling
+  src/test_trajectory_spatial_sampling.cpp
+)
+
+target_link_libraries(test_trajectory_spatial_sampling
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)

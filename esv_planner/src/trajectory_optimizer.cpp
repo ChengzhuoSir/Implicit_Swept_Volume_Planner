@@ -107,6 +107,37 @@ int headingOscillationCount(const Trajectory& traj, double sample_step) {
   return oscillations;
 }
 
+double maxBoundaryVelocityJump(const Trajectory& traj) {
+  if (traj.pos_pieces.size() < 2) return 0.0;
+  double max_jump = 0.0;
+  for (size_t i = 0; i + 1 < traj.pos_pieces.size(); ++i) {
+    const Eigen::Vector2d left =
+        traj.pos_pieces[i].velocity(traj.pos_pieces[i].duration);
+    const Eigen::Vector2d right = traj.pos_pieces[i + 1].velocity(0.0);
+    max_jump = std::max(max_jump, (left - right).norm());
+  }
+  return max_jump;
+}
+
+double maxBoundaryYawRateJump(const Trajectory& traj) {
+  if (traj.yaw_pieces.size() < 2) return 0.0;
+  double max_jump = 0.0;
+  for (size_t i = 0; i + 1 < traj.yaw_pieces.size(); ++i) {
+    const double left =
+        traj.yaw_pieces[i].velocity(traj.yaw_pieces[i].duration);
+    const double right = traj.yaw_pieces[i + 1].velocity(0.0);
+    max_jump = std::max(max_jump, std::abs(left - right));
+  }
+  return max_jump;
+}
+
+bool trajectoryBoundaryContinuityAcceptable(const Trajectory& traj) {
+  constexpr double kMaxVelocityJump = 0.15;
+  constexpr double kMaxYawRateJump = 0.35;
+  return maxBoundaryVelocityJump(traj) <= kMaxVelocityJump &&
+         maxBoundaryYawRateJump(traj) <= kMaxYawRateJump;
+}
+
 bool trajectoryShapeAcceptable(const Trajectory& traj,
                                const std::vector<SE2State>& waypoints) {
   if (traj.empty()) return false;
@@ -146,6 +177,64 @@ bool trajectoryCollisionFree(const Trajectory& traj,
 
 bool meetsClearanceTarget(double clearance, double target) {
   return clearance + 1e-6 >= target;
+}
+
+double transitionClearance(const SE2State& from,
+                           const SE2State& to,
+                           const SvsdfEvaluator* svsdf,
+                           double sample_step);
+
+std::vector<SE2State> compactSupportStatesForContinuousFit(
+    const std::vector<SE2State>& support_states,
+    const SvsdfEvaluator* svsdf,
+    double min_spacing,
+    double turn_keep_threshold,
+    double clearance_keep_threshold) {
+  if (support_states.size() <= 2) return support_states;
+
+  std::vector<SE2State> compact;
+  compact.reserve(support_states.size());
+  compact.push_back(support_states.front());
+
+  double accum = 0.0;
+  for (size_t i = 1; i + 1 < support_states.size(); ++i) {
+    accum += (support_states[i].position() - support_states[i - 1].position()).norm();
+
+    const Eigen::Vector2d prev_dir =
+        support_states[i].position() - support_states[i - 1].position();
+    const Eigen::Vector2d next_dir =
+        support_states[i + 1].position() - support_states[i].position();
+    double turn = 0.0;
+    if (prev_dir.norm() > 1e-4 && next_dir.norm() > 1e-4) {
+      turn = std::abs(normalizeAngle(
+          std::atan2(next_dir.y(), next_dir.x()) -
+          std::atan2(prev_dir.y(), prev_dir.x())));
+    }
+
+    const double clearance =
+        svsdf ? svsdf->evaluate(support_states[i]) : kInf;
+    const bool near_obstacle = clearance <= clearance_keep_threshold;
+    bool keep_for_obstacle = false;
+    if (near_obstacle) {
+      const double sample_step = 0.05;
+      const double shortcut_clearance = transitionClearance(
+          compact.back(), support_states[i + 1], svsdf, sample_step);
+      keep_for_obstacle = shortcut_clearance + 1e-6 < clearance_keep_threshold;
+    }
+    if (accum >= min_spacing || turn >= turn_keep_threshold || keep_for_obstacle) {
+      if ((support_states[i].position() - compact.back().position()).norm() > 1e-9 ||
+          std::abs(normalizeAngle(support_states[i].yaw - compact.back().yaw)) > 1e-4) {
+        compact.push_back(support_states[i]);
+      }
+      accum = 0.0;
+    }
+  }
+
+  if ((support_states.back().position() - compact.back().position()).norm() > 1e-9 ||
+      std::abs(normalizeAngle(support_states.back().yaw - compact.back().yaw)) > 1e-4) {
+    compact.push_back(support_states.back());
+  }
+  return compact;
 }
 
 std::vector<SE2State> extractSupportStates(const std::vector<SE2State>& waypoints,
@@ -411,7 +500,7 @@ void TrajectoryOptimizer::fitMincoQuintic(
     const std::vector<double>& durations,
     const Eigen::Vector2d& v0, const Eigen::Vector2d& vf,
     const Eigen::Vector2d& a0, const Eigen::Vector2d& af,
-    std::vector<PolyPiece>& pieces) {
+    std::vector<PolyPiece>& pieces) const {
 
   int N = static_cast<int>(positions.size()) - 1;
   if (N <= 0) {
@@ -499,7 +588,7 @@ void TrajectoryOptimizer::fitYawQuintic(
     const std::vector<double>& yaws,
     const std::vector<double>& durations,
     double omega0, double omegaf,
-    std::vector<YawPolyPiece>& pieces) {
+    std::vector<YawPolyPiece>& pieces) const {
 
   int N = static_cast<int>(yaws.size()) - 1;
   if (N <= 0) {
@@ -817,7 +906,6 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
 
     if (total_grad_norm < 1e-10) break;
   }
-
   auto pickPreferred = [&](const OptimizerResult& incumbent,
                            const OptimizerResult& candidate) {
     if (!candidate.success) return incumbent;
@@ -988,7 +1076,6 @@ OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
       wps[i].yaw = std::atan2(vel_dir.y(), vel_dir.x());
     }
   }
-
   const OptimizerResult optimized_result = buildPrimaryResult(wps);
   if (optimized_result.success && reference_result.success) {
     const bool no_worse_clearance =
@@ -1024,7 +1111,10 @@ Trajectory TrajectoryOptimizer::stitch(
   size_t count = std::min(segments.size(), optimized.size());
   if (count == 0) return Trajectory();
   if (count == 1 && !optimized[0].empty()) {
-    return retimeToDynamicLimits(optimized[0]);
+    const Trajectory single = retimeToDynamicLimits(optimized[0]);
+    if (trajectoryBoundaryContinuityAcceptable(single)) {
+      return single;
+    }
   }
 
   // First try exact concatenation of already validated per-segment trajectories.
@@ -1043,7 +1133,9 @@ Trajectory TrajectoryOptimizer::stitch(
   if (!concatenated.empty()) {
     const bool collision_free =
         !svsdf_ || svsdf_->evaluateTrajectory(concatenated, 0.05) >= 0.0;
-    if (collision_free && dynamicsFeasible(concatenated)) {
+    if (collision_free &&
+        dynamicsFeasible(concatenated) &&
+        trajectoryBoundaryContinuityAcceptable(concatenated)) {
       return concatenated;
     }
   }
@@ -1094,6 +1186,21 @@ Trajectory TrajectoryOptimizer::stitch(
     for (size_t i = 0; i < ds_pos.size(); ++i) {
       ds_wps[i] = SE2State(ds_pos[i].x(), ds_pos[i].y(), ds_yaws[i]);
     }
+    const double resolution = map_ ? map_->resolution() : 0.05;
+    ds_wps = compactSupportStatesForContinuousFit(
+        ds_wps, svsdf_, std::max(min_piece_len, resolution), 0.22,
+        params_.safety_margin + resolution);
+    if (ds_wps.size() < 2) {
+      return Trajectory();
+    }
+    ds_pos.clear();
+    ds_yaws.clear();
+    ds_pos.reserve(ds_wps.size());
+    ds_yaws.reserve(ds_wps.size());
+    for (const auto& wp : ds_wps) {
+      ds_pos.push_back(wp.position());
+      ds_yaws.push_back(wp.yaw);
+    }
     std::vector<double> ds_durations = allocateTime(ds_wps, total_time);
 
     Eigen::Vector2d v0 = Eigen::Vector2d::Zero();
@@ -1120,12 +1227,26 @@ Trajectory TrajectoryOptimizer::stitch(
     return retimeToDynamicLimits(result);
   };
 
+  auto stitchedCandidateAcceptable = [&](const Trajectory& traj) {
+    if (traj.empty()) return false;
+    if (!dynamicsFeasible(traj)) return false;
+    if (!trajectoryBoundaryContinuityAcceptable(traj)) return false;
+    if (!svsdf_) return true;
+    return svsdf_->evaluateTrajectory(traj, 0.05) + 1e-6 >= params_.safety_margin;
+  };
+
   Trajectory result = buildFromSpacing(1.5);
-  if (svsdf_ && !result.empty() && svsdf_->evaluateTrajectory(result, 0.05) < 0.0) {
+  if (!stitchedCandidateAcceptable(result)) {
     result = buildFromSpacing(0.45);
   }
-  if (svsdf_ && !result.empty() && svsdf_->evaluateTrajectory(result, 0.05) < 0.0) {
+  if (!stitchedCandidateAcceptable(result)) {
     result = buildFromSpacing(0.20);
+  }
+  if (!stitchedCandidateAcceptable(result)) {
+    result = buildFromSpacing(0.10);
+  }
+  if (!stitchedCandidateAcceptable(result)) {
+    result = buildFromSpacing(0.05);
   }
   return result;
 }

@@ -19,6 +19,7 @@
 #include "esv_planner/hybrid_astar.h"
 #include "esv_planner/planner_trigger_state.h"
 #include "esv_planner/svsdf_evaluator.h"
+#include "esv_planner/trajectory_sampling.h"
 #include "esv_planner/trajectory_optimizer.h"
 
 namespace esv_planner {
@@ -572,10 +573,8 @@ private:
     path_msg.header.stamp = ros::Time::now();
     path_msg.header.frame_id = "map";
 
-    double total = traj.totalDuration();
-    double dt = 0.05;
-    for (double t = 0.0; t <= total; t += dt) {
-      SE2State st = traj.sample(t);
+    const auto samples = sampleTrajectoryByArcLength(traj, 0.05, 0.02);
+    for (const auto& st : samples) {
       geometry_msgs::PoseStamped ps;
       ps.header = path_msg.header;
       ps.pose.position.x = st.x;
@@ -684,9 +683,8 @@ private:
       m.color.b = 0.0;
       m.color.a = 1.0;
 
-      double total = best.totalDuration();
-      for (double t = 0.0; t <= total; t += 0.05) {
-        SE2State st = best.sample(t);
+      const auto samples = sampleTrajectoryByArcLength(best, 0.05, 0.02);
+      for (const auto& st : samples) {
         geometry_msgs::Point p;
         p.x = st.x;
         p.y = st.y;
@@ -722,9 +720,8 @@ private:
 
     // 1) Robot footprint polygons along best trajectory (ns="footprint")
     {
-      double total = best.totalDuration();
-      for (double t = 0.0; t <= total; t += 0.3) {
-        SE2State st = best.sample(t);
+      const auto footprint_samples = sampleTrajectoryByArcLength(best, 0.45, 0.02);
+      for (const auto& st : footprint_samples) {
         ma.markers.push_back(
             makeFootprintMarker(id, "footprint", st.x, st.y, st.yaw,
                                 0.0f, 0.8f, 0.0f, 0.5f, 0.02));

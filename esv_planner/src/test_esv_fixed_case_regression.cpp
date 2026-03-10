@@ -41,6 +41,10 @@ struct FixedCaseReport {
   double selected_max_lateral_bulge = kInf;
   int selected_heading_oscillation_count = std::numeric_limits<int>::max();
   int selected_reference_heading_oscillation_count = std::numeric_limits<int>::max();
+  double selected_max_velocity_jump = kInf;
+  double selected_max_yaw_rate_jump = kInf;
+  double selected_max_near_obstacle_waviness = kInf;
+  int selected_near_obstacle_samples = 0;
   OptimizerSourceMode selected_source_mode = OptimizerSourceMode::UNKNOWN;
   bool selected_used_guard = true;
   bool selected_continuous_source_ok = false;
@@ -55,6 +59,10 @@ struct AcceptedCandidateRecord {
   double max_lateral_bulge = kInf;
   int heading_oscillation_count = std::numeric_limits<int>::max();
   int reference_heading_oscillation_count = std::numeric_limits<int>::max();
+  double max_velocity_jump = kInf;
+  double max_yaw_rate_jump = kInf;
+  double max_near_obstacle_waviness = kInf;
+  int near_obstacle_samples = 0;
   OptimizerSourceMode source_mode = OptimizerSourceMode::UNKNOWN;
   bool used_guard = true;
   bool continuous_source_ok = false;
@@ -271,6 +279,57 @@ int headingOscillationCount(const Trajectory& traj, double sample_step) {
     pts.push_back(st.position());
   }
   return headingOscillationCountForPositions(pts);
+}
+
+double maxBoundaryVelocityJump(const Trajectory& traj) {
+  if (traj.pos_pieces.size() < 2) return 0.0;
+  double max_jump = 0.0;
+  for (size_t i = 0; i + 1 < traj.pos_pieces.size(); ++i) {
+    const Eigen::Vector2d left = traj.pos_pieces[i].velocity(traj.pos_pieces[i].duration);
+    const Eigen::Vector2d right = traj.pos_pieces[i + 1].velocity(0.0);
+    max_jump = std::max(max_jump, (left - right).norm());
+  }
+  return max_jump;
+}
+
+double maxBoundaryYawRateJump(const Trajectory& traj) {
+  if (traj.yaw_pieces.size() < 2) return 0.0;
+  double max_jump = 0.0;
+  for (size_t i = 0; i + 1 < traj.yaw_pieces.size(); ++i) {
+    const double left = traj.yaw_pieces[i].velocity(traj.yaw_pieces[i].duration);
+    const double right = traj.yaw_pieces[i + 1].velocity(0.0);
+    max_jump = std::max(max_jump, std::abs(left - right));
+  }
+  return max_jump;
+}
+
+double maxNearObstacleWaviness(const Trajectory& traj,
+                               const SvsdfEvaluator& svsdf,
+                               double clearance_threshold,
+                               double sample_step,
+                               int* out_samples = nullptr) {
+  if (traj.empty()) return kInf;
+  const auto states = sampleTrajectoryStates(traj, sample_step);
+  if (states.size() < 3) {
+    if (out_samples) *out_samples = 0;
+    return 0.0;
+  }
+
+  int samples = 0;
+  double max_waviness = 0.0;
+  for (size_t i = 1; i + 1 < states.size(); ++i) {
+    const double c0 = svsdf.evaluate(states[i - 1]);
+    const double c1 = svsdf.evaluate(states[i]);
+    const double c2 = svsdf.evaluate(states[i + 1]);
+    if (std::min(c0, std::min(c1, c2)) > clearance_threshold) {
+      continue;
+    }
+    ++samples;
+    max_waviness = std::max(max_waviness, pointToSegmentDistance(
+        states[i].position(), states[i - 1].position(), states[i + 1].position()));
+  }
+  if (out_samples) *out_samples = samples;
+  return max_waviness;
 }
 
 std::vector<Eigen::Vector2d> buildReferencePolyline(
@@ -605,6 +664,11 @@ FixedCaseReport runFixedCase() {
       rec.heading_oscillation_count = headingOscillationCount(full, 0.05);
       rec.reference_heading_oscillation_count =
           headingOscillationCountForPositions(rec.reference_polyline);
+      rec.max_velocity_jump = maxBoundaryVelocityJump(full);
+      rec.max_yaw_rate_jump = maxBoundaryYawRateJump(full);
+      rec.max_near_obstacle_waviness =
+          maxNearObstacleWaviness(full, svsdf, params.safety_margin + 0.08, 0.05,
+                                  &rec.near_obstacle_samples);
       rec.source_mode = OptimizerSourceMode::CONTINUOUS;
       rec.used_guard = false;
       rec.continuous_source_ok = true;
@@ -635,6 +699,10 @@ FixedCaseReport runFixedCase() {
                 << " heading_oscillations=" << rec.heading_oscillation_count
                 << " reference_heading_oscillations="
                 << rec.reference_heading_oscillation_count
+                << " max_velocity_jump=" << rec.max_velocity_jump
+                << " max_yaw_rate_jump=" << rec.max_yaw_rate_jump
+                << " max_near_obstacle_waviness=" << rec.max_near_obstacle_waviness
+                << " near_obstacle_samples=" << rec.near_obstacle_samples
                 << " source_mode=" << static_cast<int>(rec.source_mode)
                 << " used_guard=" << (rec.used_guard ? 1 : 0)
                 << " continuous_source_ok=" << (rec.continuous_source_ok ? 1 : 0)
@@ -664,6 +732,10 @@ FixedCaseReport runFixedCase() {
         report.selected_heading_oscillation_count = rec.heading_oscillation_count;
         report.selected_reference_heading_oscillation_count =
             rec.reference_heading_oscillation_count;
+        report.selected_max_velocity_jump = rec.max_velocity_jump;
+        report.selected_max_yaw_rate_jump = rec.max_yaw_rate_jump;
+        report.selected_max_near_obstacle_waviness = rec.max_near_obstacle_waviness;
+        report.selected_near_obstacle_samples = rec.near_obstacle_samples;
         report.selected_source_mode = rec.source_mode;
         report.selected_used_guard = rec.used_guard;
         report.selected_continuous_source_ok = rec.continuous_source_ok;
@@ -702,6 +774,11 @@ int main(int argc, char** argv) {
             << " selected_heading_oscillations=" << report.selected_heading_oscillation_count
             << " selected_reference_heading_oscillations="
             << report.selected_reference_heading_oscillation_count
+            << " selected_max_velocity_jump=" << report.selected_max_velocity_jump
+            << " selected_max_yaw_rate_jump=" << report.selected_max_yaw_rate_jump
+            << " selected_max_near_obstacle_waviness="
+            << report.selected_max_near_obstacle_waviness
+            << " selected_near_obstacle_samples=" << report.selected_near_obstacle_samples
             << " selected_source_mode=" << static_cast<int>(report.selected_source_mode)
             << " selected_used_guard=" << (report.selected_used_guard ? 1 : 0)
             << " selected_continuous_source_ok="
@@ -739,6 +816,14 @@ int main(int argc, char** argv) {
   if (report.selected_heading_oscillation_count >
       report.selected_reference_heading_oscillation_count) {
     std::cerr << "[test] FAIL: selected fixed-case trajectory adds extra heading oscillation beyond the accepted motion chain\n";
+    return 1;
+  }
+  if (report.selected_max_velocity_jump > 0.15) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory still has unrealistic velocity jumps at piece boundaries\n";
+    return 1;
+  }
+  if (report.selected_max_yaw_rate_jump > 0.35) {
+    std::cerr << "[test] FAIL: selected fixed-case trajectory still has unrealistic yaw-rate jumps at piece boundaries\n";
     return 1;
   }
   if (report.selected_used_guard) {
