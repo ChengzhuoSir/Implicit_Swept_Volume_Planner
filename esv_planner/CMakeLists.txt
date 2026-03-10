@@ -229,6 +229,22 @@ target_link_libraries(test_optimizer_select_best_clearance
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_optimizer_se2_fixed_high_segments
+  src/test_optimizer_se2_fixed_high_segments.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_optimizer_se2_fixed_high_segments
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_planner_trigger_state
   src/test_planner_trigger_state.cpp
 )

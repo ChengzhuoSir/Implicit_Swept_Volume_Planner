@@ -110,39 +110,19 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
 }
 
 double SE2SequenceGenerator::footprintClearance(const SE2State& state) const {
-  const auto rotated = checker_->footprint().rotatedVertices(state.yaw);
-  const auto boundary = checker_->footprint().sampleBoundary(
-      state.yaw, map_->resolution() * 0.5);
-  if (boundary.empty()) {
+  const auto& samples = checker_->footprint().denseBodySamples(
+      map_->resolution() * 0.5, map_->resolution());
+  if (samples.empty()) {
     return map_->getEsdf(state.x, state.y);
   }
 
-  double min_dist = map_->getEsdf(state.x, state.y);
-  for (const auto& sample : boundary) {
-    const double dist = map_->getEsdf(state.x + sample.x(), state.y + sample.y());
-    min_dist = std::min(min_dist, dist);
-  }
-
-  double bb_min_x = std::numeric_limits<double>::max();
-  double bb_max_x = std::numeric_limits<double>::lowest();
-  double bb_min_y = std::numeric_limits<double>::max();
-  double bb_max_y = std::numeric_limits<double>::lowest();
-  for (const auto& v : rotated) {
-    bb_min_x = std::min(bb_min_x, v.x());
-    bb_max_x = std::max(bb_max_x, v.x());
-    bb_min_y = std::min(bb_min_y, v.y());
-    bb_max_y = std::max(bb_max_y, v.y());
-  }
-
-  const double interior_step = map_->resolution();
-  for (double gx = bb_min_x + 0.5 * interior_step; gx <= bb_max_x; gx += interior_step) {
-    for (double gy = bb_min_y + 0.5 * interior_step; gy <= bb_max_y; gy += interior_step) {
-      if (!pointInPolygon(gx, gy, rotated)) {
-        continue;
-      }
-      const double dist = map_->getEsdf(state.x + gx, state.y + gy);
-      min_dist = std::min(min_dist, dist);
-    }
+  const double c = std::cos(state.yaw);
+  const double s = std::sin(state.yaw);
+  double min_dist = kInf;
+  for (const auto& sample : samples) {
+    const double wx = state.x + c * sample.x() - s * sample.y();
+    const double wy = state.y + s * sample.x() + c * sample.y();
+    min_dist = std::min(min_dist, map_->getEsdf(wx, wy));
   }
 
   return min_dist;
@@ -152,8 +132,8 @@ double SE2SequenceGenerator::requiredClearance() const {
   return std::max(2.0 * map_->resolution(), 1e-3);
 }
 
-bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
-                                          const SE2State& to) const {
+double SE2SequenceGenerator::transitionClearance(const SE2State& from,
+                                                 const SE2State& to) const {
   const double len = (to.position() - from.position()).norm();
   const double yaw_delta = std::abs(normalizeAngle(to.yaw - from.yaw));
   const double sample_step = std::max(0.5 * map_->resolution(), 1e-3);
@@ -163,17 +143,21 @@ bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
   const int yaw_steps =
       std::max(1, static_cast<int>(std::ceil(yaw_delta / yaw_step)));
   const int n_steps = std::max(linear_steps, yaw_steps);
+  double min_clearance = kInf;
   for (int s = 0; s <= n_steps; ++s) {
     const double t = static_cast<double>(s) / static_cast<double>(n_steps);
     SE2State st;
     st.x = from.x + (to.x - from.x) * t;
     st.y = from.y + (to.y - from.y) * t;
     st.yaw = normalizeAngle(from.yaw + normalizeAngle(to.yaw - from.yaw) * t);
-    if (footprintClearance(st) < 0.0) {
-      return false;
-    }
+    min_clearance = std::min(min_clearance, footprintClearance(st));
   }
-  return true;
+  return min_clearance;
+}
+
+bool SE2SequenceGenerator::transitionSafe(const SE2State& from,
+                                          const SE2State& to) const {
+  return transitionClearance(from, to) >= requiredClearance();
 }
 
 bool SE2SequenceGenerator::bridgeUnsafeTransition(
@@ -305,6 +289,63 @@ bool SE2SequenceGenerator::pushStateFromObstacle(SE2State& state,
   }
 
   return safeYaw(state, desired_yaw);
+}
+
+bool SE2SequenceGenerator::repairStateBetweenNeighbors(
+    const SE2State& prev,
+    const SE2State& current,
+    const SE2State& next,
+    double desired_yaw,
+    SE2State& repaired) {
+  const double radial_step = std::max(map_->resolution(), 0.5 * disc_step_);
+  const int angular_samples = 32;
+  const int num_rings = std::max(4, max_push_);
+  const double required = requiredClearance();
+
+  bool found = false;
+  double best_score = -kInf;
+  SE2State best = current;
+
+  for (int ring = 0; ring <= num_rings; ++ring) {
+    const double radius = ring * radial_step;
+    const int samples = (ring == 0) ? 1 : angular_samples;
+    for (int k = 0; k < samples; ++k) {
+      const double theta = (ring == 0)
+          ? 0.0
+          : kTwoPi * static_cast<double>(k) / static_cast<double>(samples);
+      SE2State nearby(current.x + radius * std::cos(theta),
+                      current.y + radius * std::sin(theta),
+                      desired_yaw);
+      SE2State assigned = nearby;
+      if (!safeYaw(assigned, desired_yaw)) {
+        continue;
+      }
+
+      const double local_clearance = std::min(
+          footprintClearance(assigned),
+          std::min(transitionClearance(prev, assigned),
+                   transitionClearance(assigned, next)));
+      const double yaw_penalty =
+          std::abs(normalizeAngle(assigned.yaw - desired_yaw));
+      const double score = local_clearance - 0.12 * radius - 0.05 * yaw_penalty;
+      if (!found || score > best_score) {
+        found = true;
+        best_score = score;
+        best = assigned;
+      }
+      if (local_clearance >= required) {
+        repaired = assigned;
+        return true;
+      }
+    }
+  }
+
+  if (!found) {
+    return false;
+  }
+
+  repaired = best;
+  return best_score > -kInf;
 }
 
 std::vector<SE2State> SE2SequenceGenerator::buildLinearSegment(
@@ -608,6 +649,106 @@ double SE2SequenceGenerator::conservativeTrajectoryClearance(
   return svsdf_.evaluateTrajectory(traj, 0.05);
 }
 
+bool SE2SequenceGenerator::findMarginViolationWindow(
+    const std::vector<SE2State>& waypoints,
+    size_t& begin_idx,
+    size_t& end_idx) const {
+  if (waypoints.size() < 2) return false;
+
+  const double required = requiredClearance();
+  bool found = false;
+  size_t first = 0;
+  size_t last = 0;
+
+  const auto mark = [&](size_t a, size_t b) {
+    if (!found) {
+      first = a;
+      last = b;
+      found = true;
+    } else {
+      first = std::min(first, a);
+      last = std::max(last, b);
+    }
+  };
+
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    if (footprintClearance(waypoints[i]) < required) {
+      mark(i, i);
+    }
+  }
+
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    if (transitionClearance(waypoints[i], waypoints[i + 1]) < required) {
+      mark(i, i + 1);
+    }
+  }
+
+  if (!found) {
+    return false;
+  }
+
+  begin_idx = (first > 1) ? first - 2 : 0;
+  end_idx = std::min(waypoints.size() - 1, last + 2);
+  return true;
+}
+
+std::vector<MotionSegment> SE2SequenceGenerator::enforceLowSegmentMargin(
+    const std::vector<MotionSegment>& segments) {
+  std::vector<MotionSegment> refined;
+  refined.reserve(segments.size() + 4);
+
+  for (const auto& seg : segments) {
+    if (seg.waypoints.size() < 2 || seg.risk != RiskLevel::LOW) {
+      refined.push_back(seg);
+      continue;
+    }
+
+    size_t begin_idx = 0;
+    size_t end_idx = 0;
+    if (!findMarginViolationWindow(seg.waypoints, begin_idx, end_idx)) {
+      refined.push_back(seg);
+      continue;
+    }
+
+    if (begin_idx > 0) {
+      MotionSegment prefix;
+      prefix.risk = RiskLevel::LOW;
+      prefix.waypoints.assign(seg.waypoints.begin(),
+                              seg.waypoints.begin() + static_cast<long>(begin_idx + 1));
+      if (prefix.waypoints.size() >= 2) {
+        refined.push_back(std::move(prefix));
+      }
+    }
+
+    MotionSegment middle;
+    middle.waypoints.assign(seg.waypoints.begin() + static_cast<long>(begin_idx),
+                            seg.waypoints.begin() + static_cast<long>(end_idx + 1));
+    std::vector<SE2State> repaired;
+    if (tryRepairCombinedWindow(middle.waypoints, repaired) &&
+        conservativeTrajectoryClearance(repaired) >= requiredClearance()) {
+      middle.risk = RiskLevel::LOW;
+      middle.waypoints = std::move(repaired);
+    } else {
+      middle.risk = RiskLevel::HIGH;
+    }
+    if (middle.waypoints.size() >= 2) {
+      refined.push_back(std::move(middle));
+    }
+
+    if (end_idx + 1 < seg.waypoints.size()) {
+      MotionSegment suffix;
+      suffix.risk = RiskLevel::LOW;
+      suffix.waypoints.assign(seg.waypoints.begin() + static_cast<long>(end_idx),
+                              seg.waypoints.end());
+      if (suffix.waypoints.size() >= 2) {
+        refined.push_back(std::move(suffix));
+      }
+    }
+  }
+
+  return compactSegments(refined);
+}
+
 std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
                                                            const SE2State& start,
                                                            const SE2State& goal) {
@@ -699,7 +840,7 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     MotionSegment high;
     high.risk = RiskLevel::HIGH;
     high.waypoints = seed;
-    for (int pass = 0; pass < 2; ++pass) {
+    for (int pass = 0; pass < 6; ++pass) {
       for (size_t k = 1; k + 1 < high.waypoints.size(); ++k) {
         SE2State candidate = high.waypoints[k];
         bool ok = safeYaw(candidate, seed[k].yaw);
@@ -709,7 +850,10 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
         }
         if (!ok) {
           candidate = high.waypoints[k];
-          if (pushStateFromObstacle(candidate, seed[k].yaw)) {
+          if (repairStateBetweenNeighbors(high.waypoints[k - 1], candidate,
+                                          high.waypoints[k + 1], seed[k].yaw,
+                                          candidate) ||
+              pushStateFromObstacle(candidate, seed[k].yaw)) {
             high.waypoints[k] = candidate;
           }
         } else {
@@ -776,7 +920,8 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     segments.push_back(current);
   }
 
-  return compactSegments(segments);
+  auto compacted = compactSegments(segments);
+  return enforceLowSegmentMargin(compacted);
 }
 
 }  // namespace esv_planner

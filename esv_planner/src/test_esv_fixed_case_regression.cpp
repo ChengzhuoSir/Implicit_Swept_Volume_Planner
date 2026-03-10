@@ -429,6 +429,10 @@ FixedCaseReport runFixedCase() {
   topology.shortenPaths(topo_paths);
   report.topo_paths = topo_paths.size();
   std::vector<AcceptedCandidateRecord> accepted_records;
+  std::vector<size_t> topo_order(topo_paths.size());
+  for (size_t i = 0; i < topo_paths.size(); ++i) {
+    topo_order[i] = i;
+  }
 
   const double start_clearance = svsdf.evaluate(start);
   const double goal_clearance = svsdf.evaluate(goal);
@@ -440,7 +444,20 @@ FixedCaseReport runFixedCase() {
             << " goal_free=" << (checker.isFree(goal) ? 1 : 0) << "\n";
   std::cout << "[test] topo_paths=" << topo_paths.size() << "\n";
 
-  for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
+  std::sort(topo_order.begin(), topo_order.end(),
+            [&](size_t lhs, size_t rhs) {
+              const double lhs_clearance =
+                  topoPathClearance(topo_paths[lhs], svsdf, start, goal);
+              const double rhs_clearance =
+                  topoPathClearance(topo_paths[rhs], svsdf, start, goal);
+              if (std::abs(lhs_clearance - rhs_clearance) > 1e-6) {
+                return lhs_clearance > rhs_clearance;
+              }
+              return topo_paths[lhs].length < topo_paths[rhs].length;
+            });
+
+  for (size_t rank = 0; rank < topo_order.size(); ++rank) {
+    const size_t pi = topo_order[rank];
     double raw_topo_clearance = -kInf;
     if (pi < raw_topo_paths.size()) {
       raw_topo_clearance = topoPathClearance(raw_topo_paths[pi], svsdf, start, goal);
@@ -622,6 +639,11 @@ FixedCaseReport runFixedCase() {
                 << " used_guard=" << (rec.used_guard ? 1 : 0)
                 << " continuous_source_ok=" << (rec.continuous_source_ok ? 1 : 0)
                 << "\n";
+
+      if (stitched_clearance >= params.safety_margin) {
+        std::cout << "[test]   early_stop_after_margin_candidate=1 path=" << pi << "\n";
+        break;
+      }
     }
   }
 
@@ -698,8 +720,8 @@ int main(int argc, char** argv) {
     std::cerr << "[test] FAIL: expected at least one accepted ESV candidate for the fixed case\n";
     return 1;
   }
-  if (report.best_final_accepted_clearance < 0.0) {
-    std::cerr << "[test] FAIL: accepted fixed-case trajectory must satisfy min_svsdf >= 0.0\n";
+  if (report.best_final_accepted_clearance < 0.1) {
+    std::cerr << "[test] FAIL: accepted fixed-case trajectory must satisfy min_svsdf >= 0.1\n";
     return 1;
   }
   if (!report.selected_candidate_found) {

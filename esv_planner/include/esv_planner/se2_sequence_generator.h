@@ -43,6 +43,10 @@ private:
   // Required clearance used by SafeYaw and continuous edge validation.
   double requiredClearance() const;
 
+  // Conservative clearance of the continuous interpolated motion between two
+  // assigned states.
+  double transitionClearance(const SE2State& from, const SE2State& to) const;
+
   // Validate the continuous interpolated motion between two assigned states.
   bool transitionSafe(const SE2State& from, const SE2State& to) const;
 
@@ -53,6 +57,14 @@ private:
 
   // Push a colliding state toward larger ESDF, then re-run SafeYaw.
   bool pushStateFromObstacle(SE2State& state, double desired_yaw);
+
+  // Local repair for a state inside a HIGH window that must remain compatible
+  // with both neighbouring states under the required clearance target.
+  bool repairStateBetweenNeighbors(const SE2State& prev,
+                                   const SE2State& current,
+                                   const SE2State& next,
+                                   double desired_yaw,
+                                   SE2State& repaired);
 
   // SegAdjust: recursively split a failing segment around a pushed pivot.
   bool segAdjustRecursive(const std::vector<SE2State>& seed,
@@ -82,6 +94,16 @@ private:
   // semantics as the downstream fallback validator.
   double conservativeTrajectoryClearance(
       const std::vector<SE2State>& waypoints) const;
+
+  // Find the smallest local sub-window inside a LOW segment whose conservative
+  // chain clearance drops below the required margin.
+  bool findMarginViolationWindow(const std::vector<SE2State>& waypoints,
+                                 size_t& begin_idx,
+                                 size_t& end_idx) const;
+
+  // Reclassify margin-violating LOW chains into smaller local HIGH windows.
+  std::vector<MotionSegment> enforceLowSegmentMargin(
+      const std::vector<MotionSegment>& segments);
 
   // Resample a straight sub-segment for recursive SegAdjust.
   std::vector<SE2State> buildLinearSegment(const SE2State& start,

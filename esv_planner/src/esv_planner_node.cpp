@@ -259,6 +259,32 @@ private:
     };
 
     std::vector<AcceptedCandidate> accepted;
+    std::vector<size_t> topo_order(topo_paths.size());
+    for (size_t i = 0; i < topo_paths.size(); ++i) {
+      topo_order[i] = i;
+    }
+    auto topoPathClearance = [&](const TopoPath& path) {
+      if (path.waypoints.empty()) {
+        return -kInf;
+      }
+      double min_clearance = svsdf_evaluator_.evaluate(start_);
+      for (const auto& wp : path.waypoints) {
+        const double yaw = wp.has_yaw ? wp.yaw : start_.yaw;
+        min_clearance = std::min(
+            min_clearance, svsdf_evaluator_.evaluate(SE2State(wp.pos.x(), wp.pos.y(), yaw)));
+      }
+      min_clearance = std::min(min_clearance, svsdf_evaluator_.evaluate(goal_));
+      return min_clearance;
+    };
+    std::sort(topo_order.begin(), topo_order.end(),
+              [&](size_t lhs, size_t rhs) {
+                const double lhs_clearance = topoPathClearance(topo_paths[lhs]);
+                const double rhs_clearance = topoPathClearance(topo_paths[rhs]);
+                if (std::abs(lhs_clearance - rhs_clearance) > 1e-6) {
+                  return lhs_clearance > rhs_clearance;
+                }
+                return topo_paths[lhs].length < topo_paths[rhs].length;
+              });
 
     auto segmentLength = [](const std::vector<SE2State>& wps) {
       if (wps.size() < 2) return 0.0;
@@ -328,7 +354,8 @@ private:
       return report.accepted_by_current_gate;
     };
 
-    for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
+    for (size_t rank = 0; rank < topo_order.size(); ++rank) {
+      const size_t pi = topo_order[rank];
       // Stage 2: SE(2) motion sequence
       auto segments = se2_generator_.generate(topo_paths[pi], start_, goal_);
       size_t high_count = 0;
@@ -466,6 +493,10 @@ private:
           }
         }
         accepted.push_back({full, segments, accepted_high, full_report.min_svsdf});
+        if (full_report.margin_ok) {
+          ROS_INFO("  Early stop after path %zu reached target safety margin", pi);
+          break;
+        }
       } else {
         ROS_WARN("  Path %zu discarded after validation/fallback", pi);
       }

@@ -144,6 +144,10 @@ bool trajectoryCollisionFree(const Trajectory& traj,
   return clearance >= 0.0;
 }
 
+bool meetsClearanceTarget(double clearance, double target) {
+  return clearance + 1e-6 >= target;
+}
+
 std::vector<SE2State> extractSupportStates(const std::vector<SE2State>& waypoints,
                                            double min_spacing) {
   if (waypoints.size() <= 2) return waypoints;
@@ -227,6 +231,127 @@ double inPlaceRotationClearance(const Eigen::Vector2d& pos,
     min_clearance = std::min(min_clearance, svsdf->evaluate(st));
   }
   return min_clearance;
+}
+
+bool pushSupportStatesTowardClearance(std::vector<SE2State>& states,
+                                      const SvsdfEvaluator* svsdf,
+                                      const GridMap* map,
+                                      double target_clearance,
+                                      int max_passes) {
+  if (!svsdf || !map || states.size() <= 2) return false;
+
+  const double sample_step = 0.5 * map->resolution();
+  bool any_changed = false;
+  for (int pass = 0; pass < max_passes; ++pass) {
+    bool changed = false;
+    bool all_safe = true;
+    for (size_t i = 1; i + 1 < states.size(); ++i) {
+      const double state_clearance = svsdf->evaluate(states[i]);
+      const double left_clearance =
+          transitionClearance(states[i - 1], states[i], svsdf, sample_step);
+      const double right_clearance =
+          transitionClearance(states[i], states[i + 1], svsdf, sample_step);
+      const double min_clearance =
+          std::min(state_clearance, std::min(left_clearance, right_clearance));
+      if (min_clearance >= target_clearance) {
+        continue;
+      }
+
+      all_safe = false;
+      Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
+      double grad_yaw = 0.0;
+      svsdf->gradient(states[i], grad_pos, grad_yaw);
+      if (grad_pos.norm() < 1e-6) {
+        grad_pos = states[i].position() -
+                   0.5 * (states[i - 1].position() + states[i + 1].position());
+      }
+      if (grad_pos.norm() < 1e-6) {
+        continue;
+      }
+
+      const double deficit = target_clearance - min_clearance;
+      const double push = std::min(5.0 * map->resolution(),
+                                   std::max(0.5 * map->resolution(),
+                                            deficit + 0.25 * map->resolution()));
+      const Eigen::Vector2d dir = grad_pos.normalized();
+      states[i].x += push * dir.x();
+      states[i].y += push * dir.y();
+      states[i].yaw = normalizeAngle(states[i].yaw + 0.05 * grad_yaw);
+      changed = true;
+      any_changed = true;
+    }
+
+    if (all_safe || !changed) {
+      break;
+    }
+  }
+  return any_changed;
+}
+
+bool densifyMarginViolatingEdges(std::vector<SE2State>& states,
+                                 const SvsdfEvaluator* svsdf,
+                                 const GridMap* map,
+                                 double target_clearance) {
+  if (!svsdf || !map || states.size() < 2) return false;
+
+  const double sample_step = 0.5 * map->resolution();
+  std::vector<SE2State> expanded;
+  expanded.reserve(states.size() * 2);
+  expanded.push_back(states.front());
+  bool changed = false;
+
+  for (size_t i = 0; i + 1 < states.size(); ++i) {
+    const SE2State& a = states[i];
+    const SE2State& b = states[i + 1];
+    const double edge_len = (b.position() - a.position()).norm();
+    const double yaw_delta = std::abs(normalizeAngle(b.yaw - a.yaw));
+    const int linear_steps =
+        std::max(1, static_cast<int>(std::ceil(edge_len / sample_step)));
+    const int yaw_steps =
+        std::max(1, static_cast<int>(std::ceil(yaw_delta / 0.1)));
+    const int n_steps = std::max(linear_steps, yaw_steps);
+    double edge_clearance = kInf;
+    SE2State worst_state;
+    for (int s = 0; s <= n_steps; ++s) {
+      const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+      SE2State sample;
+      sample.x = a.x + (b.x - a.x) * t;
+      sample.y = a.y + (b.y - a.y) * t;
+      sample.yaw = normalizeAngle(a.yaw + normalizeAngle(b.yaw - a.yaw) * t);
+      const double clearance = svsdf->evaluate(sample);
+      if (clearance < edge_clearance) {
+        edge_clearance = clearance;
+        worst_state = sample;
+      }
+    }
+    if (edge_clearance < target_clearance && edge_len > map->resolution()) {
+      Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
+      double grad_yaw = 0.0;
+      svsdf->gradient(worst_state, grad_pos, grad_yaw);
+      if (grad_pos.norm() < 1e-6) {
+        grad_pos = worst_state.position() - 0.5 * (a.position() + b.position());
+      }
+      SE2State inserted = worst_state;
+      if (grad_pos.norm() > 1e-6) {
+        const double deficit = target_clearance - edge_clearance;
+        const double push = std::min(4.0 * map->resolution(),
+                                     std::max(0.5 * map->resolution(),
+                                              deficit + 0.5 * map->resolution()));
+        const Eigen::Vector2d dir = grad_pos.normalized();
+        inserted.x += push * dir.x();
+        inserted.y += push * dir.y();
+        inserted.yaw = normalizeAngle(inserted.yaw + 0.1 * grad_yaw);
+      }
+      expanded.push_back(inserted);
+      changed = true;
+    }
+    expanded.push_back(b);
+  }
+
+  if (changed) {
+    states.swap(expanded);
+  }
+  return changed;
 }
 
 }  // namespace
@@ -438,6 +563,7 @@ void TrajectoryOptimizer::fitYawQuintic(
 OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
+  const double target_clearance = params_.safety_margin;
   const double chain_clearance = continuousWaypointChainClearance(
       waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
   const double support_spacing = 0.01;
@@ -463,6 +589,31 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
 
   if (n_wps < 2) return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
 
+  auto buildSupportOnlyResult = [&](const std::vector<SE2State>& states) {
+    const Trajectory traj = buildSupportStateContinuousTrajectory(states, total_time);
+    double min_svsdf = -kInf;
+    if (!trajectoryCollisionFree(traj, svsdf_, &min_svsdf)) {
+      return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
+    }
+    OptimizerResult result;
+    result.success = !traj.empty();
+    result.traj = traj;
+    result.source_info.source_mode = OptimizerSourceMode::CONTINUOUS;
+    result.source_info.used_guard = false;
+    result.source_info.continuous_source_ok = !traj.empty();
+    result.min_svsdf = min_svsdf;
+    result.dynamics_ok = dynamicsFeasible(traj);
+    result.cost = 0.0;
+    return result;
+  };
+
+  const OptimizerResult reference_support_result = buildSupportOnlyResult(waypoints);
+  if (reference_support_result.success &&
+      meetsClearanceTarget(reference_support_result.min_svsdf, target_clearance) &&
+      trajectoryShapeAcceptable(reference_support_result.traj, waypoints)) {
+    return reference_support_result;
+  }
+
   auto buildPrimaryResult = [&](const std::vector<SE2State>& states) {
     OptimizerResult best;
 
@@ -473,10 +624,14 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
       }
       OptimizerResult result = buildResult(cand, OptimizerSourceMode::CONTINUOUS);
       result.min_svsdf = min_svsdf;
+      const bool result_hits_target = meetsClearanceTarget(result.min_svsdf, target_clearance);
+      const bool best_hits_target = meetsClearanceTarget(best.min_svsdf, target_clearance);
       if (!best.success ||
-          result.min_svsdf > best.min_svsdf + 1e-6 ||
-          (std::abs(result.min_svsdf - best.min_svsdf) <= 1e-6 &&
-           result.cost < best.cost)) {
+          (result_hits_target && !best_hits_target) ||
+          ((result_hits_target == best_hits_target) &&
+           (result.min_svsdf > best.min_svsdf + 1e-6 ||
+            (std::abs(result.min_svsdf - best.min_svsdf) <= 1e-6 &&
+             result.cost < best.cost)))) {
         best = result;
       }
     };
@@ -487,60 +642,51 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
   };
 
   const OptimizerResult reference_result = buildPrimaryResult(waypoints);
+  if (reference_result.success &&
+      meetsClearanceTarget(reference_result.min_svsdf, target_clearance) &&
+      trajectoryShapeAcceptable(reference_result.traj, waypoints)) {
+    return reference_result;
+  }
 
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;
-  if (svsdf_ && chain_clearance < 0.0) {
-    if (reference_result.success) {
-      return reference_result;
-    }
-  }
-
-  if (svsdf_ && map_ && n_wps > 2 && chain_clearance < 0.0) {
-    const double sample_step = 0.5 * map_->resolution();
-    for (int pass = 0; pass < 8; ++pass) {
-      bool changed = false;
-      bool all_safe = true;
-      for (int i = 1; i < n_wps - 1; ++i) {
-        const double state_clearance = svsdf_->evaluate(wps[i]);
-        const double left_clearance =
-            transitionClearance(wps[i - 1], wps[i], svsdf_, sample_step);
-        const double right_clearance =
-            transitionClearance(wps[i], wps[i + 1], svsdf_, sample_step);
-        const double min_clearance =
-            std::min(state_clearance, std::min(left_clearance, right_clearance));
-        if (min_clearance >= 0.0) {
-          continue;
-        }
-
-        all_safe = false;
-        Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
-        double grad_yaw = 0.0;
-        svsdf_->gradient(wps[i], grad_pos, grad_yaw);
-        if (grad_pos.norm() < 1e-6) {
-          grad_pos = wps[i].position() -
-                     0.5 * (wps[i - 1].position() + wps[i + 1].position());
-        }
-        if (grad_pos.norm() < 1e-6) {
-          continue;
-        }
-
-        const Eigen::Vector2d dir = grad_pos.normalized();
-        const double push = std::max(map_->resolution(),
-                                     -min_clearance + map_->resolution());
-        wps[i].x += push * dir.x();
-        wps[i].y += push * dir.y();
-        wps[i].yaw = normalizeAngle(wps[i].yaw + 0.1 * grad_yaw);
-        changed = true;
+  const bool need_margin_repair =
+      svsdf_ && map_ && n_wps > 2 && chain_clearance < target_clearance;
+  const double repair_target_clearance =
+      need_margin_repair ? (target_clearance + 0.5 * map_->resolution())
+                         : target_clearance;
+  if (need_margin_repair) {
+    const double segment_length = waypointChainLength(waypoints);
+    const int max_passes = (segment_length > 1.0 || n_wps >= 5) ? 18 : 10;
+    for (int round = 0; round < 3; ++round) {
+      const bool densified = densifyMarginViolatingEdges(
+          wps, svsdf_, map_, repair_target_clearance);
+      const bool changed = pushSupportStatesTowardClearance(
+          wps, svsdf_, map_, repair_target_clearance, max_passes);
+      OptimizerResult round_result = buildPrimaryResult(wps);
+      if (round_result.success &&
+          meetsClearanceTarget(round_result.min_svsdf, target_clearance)) {
+        break;
       }
-      if (all_safe || !changed) {
+      if (!densified && !changed) {
         break;
       }
     }
     durations = allocateTime(wps, total_time);
   }
   const std::vector<SE2State> repaired_wps = wps;
+  const OptimizerResult repaired_support_result = buildSupportOnlyResult(repaired_wps);
+  if (repaired_support_result.success &&
+      meetsClearanceTarget(repaired_support_result.min_svsdf, target_clearance) &&
+      trajectoryShapeAcceptable(repaired_support_result.traj, waypoints)) {
+    return repaired_support_result;
+  }
   const OptimizerResult repaired_result = buildPrimaryResult(repaired_wps);
+  if (repaired_result.success &&
+      meetsClearanceTarget(repaired_result.min_svsdf, target_clearance) &&
+      trajectoryShapeAcceptable(repaired_result.traj, waypoints)) {
+    return repaired_result;
+  }
 
   for (int iter = 0; iter < params_.max_iterations; ++iter) {
     std::vector<Eigen::Vector2d> positions(n_wps);
@@ -592,6 +738,40 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
           grad_pos -= params_.lambda_safety * 2.0 * pen * gp;
           grad_yaw -= params_.lambda_safety * 2.0 * pen * gy;
         }
+
+        auto accumulateEdgeSafety = [&](const SE2State& a,
+                                        const SE2State& b,
+                                        double current_weight) {
+          const double len = (b.position() - a.position()).norm();
+          const double yaw_delta = std::abs(normalizeAngle(b.yaw - a.yaw));
+          const double sample_step = map_ ? std::max(0.5 * map_->resolution(), 1e-3) : 0.05;
+          const int linear_steps =
+              std::max(1, static_cast<int>(std::ceil(len / sample_step)));
+          const int yaw_steps =
+              std::max(1, static_cast<int>(std::ceil(yaw_delta / 0.1)));
+          const int n_steps = std::max(linear_steps, yaw_steps);
+          for (int s = 1; s < n_steps; ++s) {
+            const double t = static_cast<double>(s) / static_cast<double>(n_steps);
+            SE2State sample;
+            sample.x = a.x + (b.x - a.x) * t;
+            sample.y = a.y + (b.y - a.y) * t;
+            sample.yaw = normalizeAngle(a.yaw + normalizeAngle(b.yaw - a.yaw) * t);
+            const double sdf = svsdf_->evaluate(sample);
+            if (sdf >= params_.safety_margin) {
+              continue;
+            }
+            Eigen::Vector2d gp;
+            double gy = 0.0;
+            svsdf_->gradient(sample, gp, gy);
+            const double pen = params_.safety_margin - sdf;
+            const double weight =
+                std::max(0.0, std::min(1.0, current_weight));
+            grad_pos -= params_.lambda_safety * 2.0 * pen * weight * gp;
+            grad_yaw -= params_.lambda_safety * 2.0 * pen * weight * gy;
+          }
+        };
+        accumulateEdgeSafety(wps[i - 1], wps[i], 1.0);
+        accumulateEdgeSafety(wps[i], wps[i + 1], 1.0);
       }
 
       // --- Dynamics: penalise velocity exceeding max_vel ---
@@ -638,21 +818,28 @@ OptimizerResult TrajectoryOptimizer::optimizeSE2Detailed(
     if (total_grad_norm < 1e-10) break;
   }
 
-  const OptimizerResult optimized_result = buildPrimaryResult(wps);
   auto pickPreferred = [&](const OptimizerResult& incumbent,
                            const OptimizerResult& candidate) {
     if (!candidate.success) return incumbent;
     if (!incumbent.success) return candidate;
 
+    const bool candidate_hits_target =
+        meetsClearanceTarget(candidate.min_svsdf, target_clearance);
+    const bool incumbent_hits_target =
+        meetsClearanceTarget(incumbent.min_svsdf, target_clearance);
     const bool no_worse_clearance =
         candidate.min_svsdf + 1e-6 >= incumbent.min_svsdf;
     const bool lower_cost = candidate.cost + 1e-6 < incumbent.cost;
     const bool keep_shape =
         trajectoryShapeAcceptable(candidate.traj, waypoints);
-    return (no_worse_clearance && lower_cost && keep_shape)
+    return (((candidate_hits_target && !incumbent_hits_target) ||
+             (no_worse_clearance && lower_cost)) &&
+            keep_shape)
                ? candidate
                : incumbent;
   };
+
+  const OptimizerResult optimized_result = buildPrimaryResult(wps);
 
   OptimizerResult selected = reference_result;
   selected = pickPreferred(selected, repaired_result);
@@ -676,8 +863,12 @@ Trajectory TrajectoryOptimizer::optimizeSE2(
 OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     const std::vector<SE2State>& waypoints, double total_time) {
 
+  const double target_clearance = params_.safety_margin;
   const double chain_clearance = continuousWaypointChainClearance(
       waypoints, svsdf_, map_ ? 0.5 * map_->resolution() : 0.05);
+  if (svsdf_ && chain_clearance + 1e-6 < target_clearance) {
+    return OptimizerResult();
+  }
   const double support_spacing = 0.01;
   std::vector<SE2State> wps = extractSupportStates(waypoints, support_spacing);
   int n_wps = static_cast<int>(wps.size());
@@ -708,11 +899,19 @@ OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     if (!trajectoryCollisionFree(traj, svsdf_, &min_svsdf)) {
       return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
     }
+    if (!meetsClearanceTarget(min_svsdf, target_clearance)) {
+      return buildResult(Trajectory(), OptimizerSourceMode::UNKNOWN);
+    }
     OptimizerResult result = buildResult(traj, OptimizerSourceMode::CONTINUOUS);
     result.min_svsdf = min_svsdf;
     return result;
   };
   const OptimizerResult reference_result = buildPrimaryResult(ref);
+  if (reference_result.success &&
+      meetsClearanceTarget(reference_result.min_svsdf, target_clearance) &&
+      trajectoryShapeAcceptable(reference_result.traj, waypoints)) {
+    return reference_result;
+  }
 
   std::vector<double> durations = allocateTime(wps, total_time);
   double step = params_.step_size;

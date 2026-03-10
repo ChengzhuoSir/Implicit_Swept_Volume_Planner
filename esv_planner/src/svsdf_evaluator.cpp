@@ -30,66 +30,17 @@ static bool pointInPolygon(double px, double py,
 }
 
 double SvsdfEvaluator::evaluate(const SE2State& state) const {
-  auto rotated = footprint_->rotatedVertices(state.yaw);
   const double res = map_->resolution();
-  const int n = static_cast<int>(rotated.size());
+  const auto& samples = footprint_->denseBodySamples(res, 2.0 * res);
+  const double c = std::cos(state.yaw);
+  const double s = std::sin(state.yaw);
 
   double min_dist = kInf;
-
-  // Helper: query ESDF at a body-frame offset point
-  auto queryPoint = [&](double lx, double ly) {
-    double wx = state.x + lx;
-    double wy = state.y + ly;
-    double d = map_->getEsdf(wx, wy);
-    if (d < min_dist) min_dist = d;
-  };
-
-  // --- 1. Densely sample the polygon boundary at resolution-level spacing ---
-  for (int i = 0; i < n; ++i) {
-    int j = (i + 1) % n;
-    const Eigen::Vector2d& p0 = rotated[i];
-    const Eigen::Vector2d& p1 = rotated[j];
-    Eigen::Vector2d edge = p1 - p0;
-    double edge_len = edge.norm();
-    if (edge_len < 1e-12) {
-      queryPoint(p0.x(), p0.y());
-      continue;
-    }
-    // Number of samples along this edge (at least the two endpoints)
-    int num_samples = std::max(2, static_cast<int>(std::ceil(edge_len / res)) + 1);
-    for (int s = 0; s < num_samples; ++s) {
-      double t = static_cast<double>(s) / static_cast<double>(num_samples - 1);
-      Eigen::Vector2d pt = p0 + t * edge;
-      queryPoint(pt.x(), pt.y());
-    }
+  for (const auto& sample : samples) {
+    const double wx = state.x + c * sample.x() - s * sample.y();
+    const double wy = state.y + s * sample.x() + c * sample.y();
+    min_dist = std::min(min_dist, map_->getEsdf(wx, wy));
   }
-
-  // --- 2. Sample interior points on a grid within the polygon's bounding box ---
-  double interior_step = 2.0 * res;
-
-  // Compute axis-aligned bounding box of the rotated polygon (body frame)
-  double bb_min_x = std::numeric_limits<double>::max();
-  double bb_max_x = std::numeric_limits<double>::lowest();
-  double bb_min_y = std::numeric_limits<double>::max();
-  double bb_max_y = std::numeric_limits<double>::lowest();
-  for (int i = 0; i < n; ++i) {
-    bb_min_x = std::min(bb_min_x, rotated[i].x());
-    bb_max_x = std::max(bb_max_x, rotated[i].x());
-    bb_min_y = std::min(bb_min_y, rotated[i].y());
-    bb_max_y = std::max(bb_max_y, rotated[i].y());
-  }
-
-  // Iterate over interior grid points and check if inside polygon via ray casting
-  for (double gx = bb_min_x + interior_step * 0.5; gx <= bb_max_x; gx += interior_step) {
-    for (double gy = bb_min_y + interior_step * 0.5; gy <= bb_max_y; gy += interior_step) {
-      if (pointInPolygon(gx, gy, rotated)) {
-        queryPoint(gx, gy);
-      }
-    }
-  }
-
-  // --- 3. Always sample the centroid (robot center) ---
-  queryPoint(0.0, 0.0);
 
   return min_dist;
 }

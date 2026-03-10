@@ -4,10 +4,32 @@
 
 namespace esv_planner {
 
+namespace {
+
+bool pointInPolygon(double px, double py,
+                    const std::vector<Eigen::Vector2d>& verts) {
+  bool inside = false;
+  const int n = static_cast<int>(verts.size());
+  for (int i = 0, j = n - 1; i < n; j = i++) {
+    const double yi = verts[i].y();
+    const double yj = verts[j].y();
+    const double xi = verts[i].x();
+    const double xj = verts[j].x();
+    if (((yi > py) != (yj > py)) &&
+        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+}  // namespace
+
 FootprintModel::FootprintModel() {}
 
 void FootprintModel::setPolygon(const std::vector<Eigen::Vector2d>& vertices) {
   vertices_ = vertices;
+  dense_sample_caches_.clear();
   computeCircumscribedRadius();
 }
 
@@ -89,6 +111,76 @@ std::vector<Eigen::Vector2d> FootprintModel::sampleBoundary(double yaw, double s
   }
   samples.push_back(rotated.front());
   return samples;
+}
+
+const std::vector<Eigen::Vector2d>& FootprintModel::denseBodySamples(
+    double boundary_step, double interior_step) const {
+  const double boundary_spacing = std::max(1e-3, boundary_step);
+  const double interior_spacing = std::max(1e-3, interior_step);
+
+  for (const auto& cache : dense_sample_caches_) {
+    if (std::abs(cache.boundary_step - boundary_spacing) < 1e-9 &&
+        std::abs(cache.interior_step - interior_spacing) < 1e-9) {
+      return cache.samples;
+    }
+  }
+
+  DenseSampleCache cache;
+  cache.boundary_step = boundary_spacing;
+  cache.interior_step = interior_spacing;
+
+  if (vertices_.empty()) {
+    dense_sample_caches_.push_back(std::move(cache));
+    return dense_sample_caches_.back().samples;
+  }
+
+  if (vertices_.size() == 1) {
+    cache.samples.push_back(vertices_.front());
+    dense_sample_caches_.push_back(std::move(cache));
+    return dense_sample_caches_.back().samples;
+  }
+
+  cache.samples.reserve(vertices_.size() * 8);
+  for (size_t i = 0; i < vertices_.size(); ++i) {
+    const Eigen::Vector2d& a = vertices_[i];
+    const Eigen::Vector2d& b = vertices_[(i + 1) % vertices_.size()];
+    const Eigen::Vector2d delta = b - a;
+    const double len = delta.norm();
+    if (len < 1e-9) {
+      cache.samples.push_back(a);
+      continue;
+    }
+
+    const int n = std::max(2, static_cast<int>(std::ceil(len / boundary_spacing)) + 1);
+    for (int s = 0; s < n - 1; ++s) {
+      const double r = static_cast<double>(s) / static_cast<double>(n - 1);
+      cache.samples.push_back(a + r * delta);
+    }
+  }
+  cache.samples.push_back(vertices_.front());
+
+  double bb_min_x = std::numeric_limits<double>::max();
+  double bb_max_x = std::numeric_limits<double>::lowest();
+  double bb_min_y = std::numeric_limits<double>::max();
+  double bb_max_y = std::numeric_limits<double>::lowest();
+  for (const auto& v : vertices_) {
+    bb_min_x = std::min(bb_min_x, v.x());
+    bb_max_x = std::max(bb_max_x, v.x());
+    bb_min_y = std::min(bb_min_y, v.y());
+    bb_max_y = std::max(bb_max_y, v.y());
+  }
+
+  for (double gx = bb_min_x + 0.5 * interior_spacing; gx <= bb_max_x; gx += interior_spacing) {
+    for (double gy = bb_min_y + 0.5 * interior_spacing; gy <= bb_max_y; gy += interior_spacing) {
+      if (pointInPolygon(gx, gy, vertices_)) {
+        cache.samples.emplace_back(gx, gy);
+      }
+    }
+  }
+
+  cache.samples.emplace_back(0.0, 0.0);
+  dense_sample_caches_.push_back(std::move(cache));
+  return dense_sample_caches_.back().samples;
 }
 
 }  // namespace esv_planner

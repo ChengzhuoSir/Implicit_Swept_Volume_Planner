@@ -139,6 +139,21 @@ double segmentChainClearance(const std::vector<SE2State>& waypoints,
   return min_clearance;
 }
 
+double topoPathClearance(const TopoPath& path,
+                         const SvsdfEvaluator& svsdf,
+                         const SE2State& start,
+                         const SE2State& goal) {
+  if (path.waypoints.empty()) return -kInf;
+  double min_clearance = svsdf.evaluate(start);
+  for (const auto& wp : path.waypoints) {
+    const double yaw = wp.has_yaw ? wp.yaw : start.yaw;
+    min_clearance = std::min(
+        min_clearance, svsdf.evaluate(SE2State(wp.pos.x(), wp.pos.y(), yaw)));
+  }
+  min_clearance = std::min(min_clearance, svsdf.evaluate(goal));
+  return min_clearance;
+}
+
 Trajectory buildLinearTrajectory(const std::vector<SE2State>& waypoints,
                                  double total_time) {
   Trajectory traj;
@@ -232,7 +247,24 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
   total_high_risk_segments = 0;
   accepted_high_risk_segments = 0;
 
-  for (size_t path_idx = 0; path_idx < topo_paths.size(); ++path_idx) {
+  std::vector<size_t> topo_order(topo_paths.size());
+  for (size_t i = 0; i < topo_paths.size(); ++i) {
+    topo_order[i] = i;
+  }
+  std::sort(topo_order.begin(), topo_order.end(),
+            [&](size_t lhs, size_t rhs) {
+              const double lhs_clearance =
+                  topoPathClearance(topo_paths[lhs], svsdf, start, goal);
+              const double rhs_clearance =
+                  topoPathClearance(topo_paths[rhs], svsdf, start, goal);
+              if (std::abs(lhs_clearance - rhs_clearance) > 1e-6) {
+                return lhs_clearance > rhs_clearance;
+              }
+              return topo_paths[lhs].length < topo_paths[rhs].length;
+            });
+
+  for (size_t rank = 0; rank < topo_order.size(); ++rank) {
+    const size_t path_idx = topo_order[rank];
     const auto& path = topo_paths[path_idx];
     auto segments = se2gen.generate(path, start, goal);
     if (segments.empty()) continue;
@@ -338,6 +370,11 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
     if (valid) {
       accepted.push_back({full, path_high_risk_segments, full_clearance});
       std::cout << "[test]   path=" << path_idx << " accepted\n";
+      if (accepted.size() >= 2 && full_clearance + 1e-6 >= params.safety_margin) {
+        std::cout << "[test]   early_stop_after_margin_candidate=1 path="
+                  << path_idx << "\n";
+        break;
+      }
     } else {
       std::cout << "[test]   path=" << path_idx << " rejected\n";
     }
