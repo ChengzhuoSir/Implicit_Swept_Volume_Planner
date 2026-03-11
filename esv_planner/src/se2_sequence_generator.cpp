@@ -1017,7 +1017,30 @@ std::vector<MotionSegment> SE2SequenceGenerator::generateCoreSegments(
 
 std::vector<MotionSegment> SE2SequenceGenerator::finalizeSegments(
     const std::vector<MotionSegment>& segments) {
-  return segments;
+  std::vector<MotionSegment> merged;
+  merged.reserve(segments.size());
+  for (const auto& seg : segments) {
+    if (seg.waypoints.size() < 2) {
+      continue;
+    }
+    if (!merged.empty() && merged.back().risk == seg.risk) {
+      std::vector<SE2State> combined =
+          appendStates(merged.back().waypoints, seg.waypoints);
+      bool can_merge = false;
+      if (seg.risk == RiskLevel::HIGH) {
+        can_merge = combined.size() <= 12;
+      } else {
+        can_merge =
+            conservativeTrajectoryClearance(combined) + 1e-6 >= requiredClearance();
+      }
+      if (can_merge) {
+        merged.back().waypoints = std::move(combined);
+        continue;
+      }
+    }
+    merged.push_back(seg);
+  }
+  return merged;
 }
 
 std::vector<MotionSegment> SE2SequenceGenerator::generateCore(

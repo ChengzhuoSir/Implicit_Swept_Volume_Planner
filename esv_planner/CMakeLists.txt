@@ -313,6 +313,16 @@ target_link_libraries(test_optimizer_r2_paper_semantics
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_optimizer_r2_continuous_polynomial
+  test/test_optimizer_r2_continuous_polynomial.cpp
+  ${ESV_OPTIMIZER_SOURCES}
+)
+
+target_link_libraries(test_optimizer_r2_continuous_polynomial
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_optimizer_se2_time_refinement
   test/test_optimizer_se2_time_refinement.cpp
   ${ESV_SVSDF_SOURCES}
@@ -391,6 +401,16 @@ add_executable(test_optimizer_se2_maze_l_path1_high_segment
 )
 
 target_link_libraries(test_optimizer_se2_maze_l_path1_high_segment
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_optimizer_se2_continuous_polynomial
+  test/test_optimizer_se2_continuous_polynomial.cpp
+  ${ESV_OPTIMIZER_SOURCES}
+)
+
+target_link_libraries(test_optimizer_se2_continuous_polynomial
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )

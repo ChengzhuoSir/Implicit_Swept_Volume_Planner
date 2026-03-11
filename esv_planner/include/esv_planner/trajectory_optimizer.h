@@ -94,13 +94,15 @@ private:
                        const std::vector<double>& durations,
                        const Eigen::Vector2d& v0, const Eigen::Vector2d& vf,
                        const Eigen::Vector2d& a0, const Eigen::Vector2d& af,
-                       std::vector<PolyPiece>& pieces) const;
+                       std::vector<PolyPiece>& pieces,
+                       double tangent_scale = 1.0) const;
 
   // Fit yaw quintic pieces
   void fitYawQuintic(const std::vector<double>& yaws,
                      const std::vector<double>& durations,
                      double omega0, double omegaf,
-                     std::vector<YawPolyPiece>& pieces) const;
+                     std::vector<YawPolyPiece>& pieces,
+                     double tangent_scale = 1.0) const;
 
   // Allocate time per segment based on distance
   std::vector<double> allocateTime(const std::vector<SE2State>& wps, double total_time) const;

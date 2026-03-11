@@ -49,6 +49,17 @@ double continuousWaypointChainClearance(const std::vector<SE2State>& waypoints,
   return min_clearance;
 }
 
+std::vector<double> unwrapYawSequence(const std::vector<SE2State>& states) {
+  std::vector<double> yaws;
+  yaws.reserve(states.size());
+  if (states.empty()) return yaws;
+  yaws.push_back(states.front().yaw);
+  for (size_t i = 1; i < states.size(); ++i) {
+    yaws.push_back(yaws.back() + normalizeAngle(states[i].yaw - states[i - 1].yaw));
+  }
+  return yaws;
+}
+
 double waypointChainLength(const std::vector<SE2State>& waypoints) {
   if (waypoints.size() < 2) return 0.0;
   double len = 0.0;
@@ -1115,7 +1126,8 @@ void TrajectoryOptimizer::fitMincoQuintic(
     const std::vector<double>& durations,
     const Eigen::Vector2d& v0, const Eigen::Vector2d& vf,
     const Eigen::Vector2d& a0, const Eigen::Vector2d& af,
-    std::vector<PolyPiece>& pieces) const {
+    std::vector<PolyPiece>& pieces,
+    double tangent_scale) const {
 
   int N = static_cast<int>(positions.size()) - 1;
   if (N <= 0) {
@@ -1126,16 +1138,16 @@ void TrajectoryOptimizer::fitMincoQuintic(
   // Compute boundary velocities and accelerations at each waypoint.
   std::vector<Eigen::Vector2d> vels(N + 1);
   std::vector<Eigen::Vector2d> accs(N + 1);
-  vels[0] = v0;
-  vels[N] = vf;
-  accs[0] = a0;
-  accs[N] = af;
+  vels[0] = tangent_scale * v0;
+  vels[N] = tangent_scale * vf;
+  accs[0] = tangent_scale * a0;
+  accs[N] = tangent_scale * af;
 
   // Interior velocities: Catmull-Rom estimate, clamped.
   for (int i = 1; i < N; ++i) {
     double dt_sum = durations[i - 1] + durations[i];
     if (dt_sum < 1e-6) dt_sum = 1e-6;
-    vels[i] = (positions[i + 1] - positions[i - 1]) / dt_sum;
+    vels[i] = tangent_scale * (positions[i + 1] - positions[i - 1]) / dt_sum;
     // Clamp velocity magnitude
     double v_norm = vels[i].norm();
     double max_v = 2.0;  // match max_vel param
@@ -1203,7 +1215,8 @@ void TrajectoryOptimizer::fitYawQuintic(
     const std::vector<double>& yaws,
     const std::vector<double>& durations,
     double omega0, double omegaf,
-    std::vector<YawPolyPiece>& pieces) const {
+    std::vector<YawPolyPiece>& pieces,
+    double tangent_scale) const {
 
   int N = static_cast<int>(yaws.size()) - 1;
   if (N <= 0) {
@@ -1213,14 +1226,14 @@ void TrajectoryOptimizer::fitYawQuintic(
 
   std::vector<double> omegas(N + 1, 0.0);
   std::vector<double> alphas(N + 1, 0.0);
-  omegas[0] = omega0;
-  omegas[N] = omegaf;
+  omegas[0] = tangent_scale * omega0;
+  omegas[N] = tangent_scale * omegaf;
 
   for (int i = 1; i < N; ++i) {
     double dt_sum = durations[i - 1] + durations[i];
     if (dt_sum < 1e-12) dt_sum = 1e-12;
     double dy = normalizeAngle(yaws[i + 1] - yaws[i - 1]);
-    omegas[i] = dy / dt_sum;
+    omegas[i] = tangent_scale * dy / dt_sum;
     alphas[i] = 0.0;
   }
 
@@ -1970,11 +1983,15 @@ OptimizerResult TrajectoryOptimizer::optimizeR2Detailed(
     const Trajectory continuous =
         buildSupportStateContinuousTrajectory(states, total_time);
     consider(continuous, OptimizerSourceMode::CONTINUOUS);
-    if (!best.success || best.min_svsdf < safety_push_clearance) {
+    if (best.success &&
+        meetsClearanceTarget(best.min_svsdf, target_clearance)) {
+      return best;
+    }
+    if (!best.success || !meetsClearanceTarget(best.min_svsdf, target_clearance)) {
       consider(buildConservativePolylineTrajectory(states, total_time),
                OptimizerSourceMode::POLYLINE_GUARD);
     }
-    if (!best.success || best.min_svsdf < safety_push_clearance) {
+    if (!best.success || !meetsClearanceTarget(best.min_svsdf, target_clearance)) {
       consider(buildRotateTranslateTrajectory(states, total_time),
                OptimizerSourceMode::ROTATE_TRANSLATE_GUARD);
     }
@@ -2553,39 +2570,63 @@ Trajectory TrajectoryOptimizer::buildSupportStateContinuousTrajectory(
   std::vector<double> durations = allocateTime(support_states, total_time);
   if (durations.size() + 1 != support_states.size()) return Trajectory();
 
-  Trajectory traj;
-  traj.pos_pieces.reserve(durations.size());
-  traj.yaw_pieces.reserve(durations.size());
-
-  for (size_t i = 0; i + 1 < support_states.size(); ++i) {
-    const SE2State& a = support_states[i];
-    const SE2State& b = support_states[i + 1];
-    const double T = std::max(0.05, durations[i]);
-    const Eigen::Vector2d delta = b.position() - a.position();
-
-    PolyPiece pp;
-    pp.duration = T;
-    pp.coeffs.col(0) = a.position();
-    pp.coeffs.col(1) = delta / T;
-    pp.coeffs.col(2).setZero();
-    pp.coeffs.col(3).setZero();
-    pp.coeffs.col(4).setZero();
-    pp.coeffs.col(5).setZero();
-    traj.pos_pieces.push_back(pp);
-
-    const double yaw_delta = normalizeAngle(b.yaw - a.yaw);
-    YawPolyPiece yp;
-    yp.duration = T;
-    yp.coeffs(0, 0) = a.yaw;
-    yp.coeffs(0, 1) = yaw_delta / T;
-    yp.coeffs(0, 2) = 0.0;
-    yp.coeffs(0, 3) = 0.0;
-    yp.coeffs(0, 4) = 0.0;
-    yp.coeffs(0, 5) = 0.0;
-    traj.yaw_pieces.push_back(yp);
+  std::vector<Eigen::Vector2d> positions;
+  positions.reserve(support_states.size());
+  for (const auto& st : support_states) {
+    positions.push_back(st.position());
   }
 
-  return retimeToDynamicLimits(traj);
+  const std::vector<double> yaws = unwrapYawSequence(support_states);
+  const Eigen::Vector2d first_delta =
+      support_states[1].position() - support_states[0].position();
+  const Eigen::Vector2d last_delta =
+      support_states.back().position() - support_states[support_states.size() - 2].position();
+  const double first_dt = std::max(0.05, durations.front());
+  const double last_dt = std::max(0.05, durations.back());
+  const Eigen::Vector2d base_v0 = first_delta / first_dt;
+  const Eigen::Vector2d base_vf = last_delta / last_dt;
+  const Eigen::Vector2d a0 = Eigen::Vector2d::Zero();
+  const Eigen::Vector2d af = Eigen::Vector2d::Zero();
+  const double base_omega0 = normalizeAngle(yaws[1] - yaws[0]) / first_dt;
+  const double base_omegaf =
+      normalizeAngle(yaws.back() - yaws[yaws.size() - 2]) / last_dt;
+
+  const std::array<double, 4> tangent_scales = {1.0, 0.6, 0.3, 0.0};
+  Trajectory best_traj;
+  double best_clearance = -kInf;
+
+  for (double tangent_scale : tangent_scales) {
+    Trajectory traj;
+    traj.pos_pieces.reserve(durations.size());
+    traj.yaw_pieces.reserve(durations.size());
+    fitMincoQuintic(positions, durations, base_v0, base_vf, a0, af,
+                    traj.pos_pieces, tangent_scale);
+    fitYawQuintic(yaws, durations, base_omega0, base_omegaf,
+                  traj.yaw_pieces, tangent_scale);
+
+    if (traj.pos_pieces.size() != durations.size() ||
+        traj.yaw_pieces.size() != durations.size()) {
+      continue;
+    }
+
+    traj = retimeToDynamicLimits(traj);
+    if (traj.empty()) {
+      continue;
+    }
+    if (!trajectoryBoundaryContinuityAcceptable(traj)) {
+      continue;
+    }
+    const double clearance = svsdf_ ? svsdf_->evaluateTrajectory(traj) : kInf;
+    if (meetsClearanceTarget(clearance, params_.safety_margin)) {
+      return traj;
+    }
+    if (clearance > best_clearance + 1e-6) {
+      best_clearance = clearance;
+      best_traj = traj;
+    }
+  }
+
+  return best_traj;
 }
 
 Trajectory TrajectoryOptimizer::buildRotateTranslateTrajectory(
