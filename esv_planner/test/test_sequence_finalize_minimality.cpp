@@ -98,6 +98,16 @@ size_t totalHighWaypoints(const std::vector<MotionSegment>& segments) {
   return total;
 }
 
+bool sameSegmentationShape(const std::vector<MotionSegment>& lhs,
+                           const std::vector<MotionSegment>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (lhs[i].risk != rhs[i].risk) return false;
+    if (lhs[i].waypoints.size() != rhs[i].waypoints.size()) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -163,6 +173,10 @@ int main(int argc, char** argv) {
   }
   if (final_high_wp > core_high_wp) {
     std::cerr << "[test] FAIL: finalize should not expand total HIGH waypoint context\n";
+    return 1;
+  }
+  if (!sameSegmentationShape(core, final)) {
+    std::cerr << "[test] FAIL: finalize should preserve the core segmentation shape on the fixed case\n";
     return 1;
   }
 

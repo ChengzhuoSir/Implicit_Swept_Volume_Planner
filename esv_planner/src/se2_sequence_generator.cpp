@@ -1017,7 +1017,7 @@ std::vector<MotionSegment> SE2SequenceGenerator::generateCoreSegments(
 
 std::vector<MotionSegment> SE2SequenceGenerator::finalizeSegments(
     const std::vector<MotionSegment>& segments) {
-  return compactSegments(segments);
+  return segments;
 }
 
 std::vector<MotionSegment> SE2SequenceGenerator::generateCore(
