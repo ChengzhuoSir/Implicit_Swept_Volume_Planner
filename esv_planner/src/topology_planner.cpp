@@ -84,37 +84,6 @@ TopoWaypoint withExistingOrIncomingYaw(const TopoWaypoint& from, const TopoWaypo
   return to.has_yaw ? to : withIncomingYaw(from, to);
 }
 
-Eigen::Vector2d esdfAscentDirection(const GridMap& map,
-                                    const Eigen::Vector2d& world,
-                                    double eps) {
-  const double ex_p = map.getEsdf(world.x() + eps, world.y());
-  const double ex_n = map.getEsdf(world.x() - eps, world.y());
-  const double ey_p = map.getEsdf(world.x(), world.y() + eps);
-  const double ey_n = map.getEsdf(world.x(), world.y() - eps);
-  Eigen::Vector2d grad(ex_p - ex_n, ey_p - ey_n);
-  if (grad.norm() > 1e-9) {
-    return grad.normalized();
-  }
-
-  const double base = map.getEsdf(world.x(), world.y());
-  Eigen::Vector2d best = Eigen::Vector2d::Zero();
-  double best_gain = 0.0;
-  for (int k = 0; k < 16; ++k) {
-    const double theta = kTwoPi * static_cast<double>(k) / 16.0;
-    const Eigen::Vector2d dir(std::cos(theta), std::sin(theta));
-    for (double scale : {1.0, 2.0, 3.0}) {
-      const double value = map.getEsdf(world.x() + scale * eps * dir.x(),
-                                       world.y() + scale * eps * dir.y());
-      const double gain = value - base;
-      if (gain > best_gain) {
-        best_gain = gain;
-        best = dir;
-      }
-    }
-  }
-  return best;
-}
-
 bool isOccupiedValue(int8_t val) {
   return val > 50 || val < 0;
 }
@@ -613,112 +582,6 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
     return candidate_worst;
   };
 
-  auto tryTranslationSearch = [&](TopoWaypoint& candidate) {
-    auto normalizedOrZero = [](const Eigen::Vector2d& v) {
-      return v.norm() > 1e-9 ? v.normalized() : Eigen::Vector2d::Zero();
-    };
-    auto appendDirection = [](std::vector<Eigen::Vector2d>& dirs,
-                              const Eigen::Vector2d& dir) {
-      if (dir.norm() < 1e-9) return;
-      const Eigen::Vector2d unit = dir.normalized();
-      for (const auto& existing : dirs) {
-        if (std::abs(existing.dot(unit)) > 0.985) {
-          return;
-        }
-      }
-      dirs.push_back(unit);
-    };
-
-    const auto candidate_obstacles =
-        collectLocalObstacleSamples(obstacle_points_, candidate.pos, obstacle_radius);
-    if (candidate_obstacles.empty()) {
-      return false;
-    }
-
-    double worst_dist = kInf;
-    Eigen::Vector2d worst_grad_world = Eigen::Vector2d::Zero();
-    Eigen::Vector2d nearest_obstacle_dir = Eigen::Vector2d::Zero();
-    double nearest_obstacle_dist2 = kInf;
-    const auto infos = queryObstacleInfos(candidate, candidate_obstacles);
-    for (const auto& info : infos) {
-      if (info.effective_dist < worst_dist) {
-        worst_dist = info.effective_dist;
-        worst_grad_world = rotateIntoWorld(info.query.gradient, candidate.yaw);
-      }
-      const Eigen::Vector2d rel = info.world - candidate.pos;
-      const double dist2 = rel.squaredNorm();
-      if (dist2 < nearest_obstacle_dist2 && dist2 > 1e-12) {
-        nearest_obstacle_dist2 = dist2;
-        nearest_obstacle_dir = rel.normalized();
-      }
-    }
-
-    std::vector<Eigen::Vector2d> dirs;
-    const Eigen::Vector2d primary = normalizedOrZero(-worst_grad_world);
-    appendDirection(dirs, primary);
-    appendDirection(dirs, -primary);
-    if (primary.norm() > 1e-9) {
-      appendDirection(dirs, Eigen::Vector2d(-primary.y(), primary.x()));
-      appendDirection(dirs, Eigen::Vector2d(primary.y(), -primary.x()));
-    }
-    appendDirection(dirs, normalizedOrZero(-nearest_obstacle_dir));
-    appendDirection(dirs, normalizedOrZero(esdfAscentDirection(*map_, candidate.pos, eps)));
-
-    struct TrialCandidate {
-      TopoWaypoint wp;
-      double clearance = -kInf;
-    };
-
-    std::vector<TrialCandidate> ranked;
-    ranked.reserve(dirs.size() * 2);
-    const double radial_step = std::max(map_->resolution(), 0.5 * safe_dist);
-    for (double radius_scale : {1.0, 2.0}) {
-      const double radius = radius_scale * radial_step;
-      for (const auto& dir : dirs) {
-        TopoWaypoint trial(candidate.pos + radius * dir);
-        trial.yaw = candidate.yaw;
-        trial.has_yaw = true;
-        const double clearance =
-            evaluator_.evaluate(SE2State(trial.pos.x(), trial.pos.y(), trial.yaw));
-        if (clearance >= 0.0) {
-          candidate = trial;
-          return true;
-        }
-        ranked.push_back({trial, clearance});
-      }
-    }
-
-    if (ranked.empty()) {
-      return false;
-    }
-
-    std::sort(ranked.begin(), ranked.end(),
-              [](const TrialCandidate& lhs, const TrialCandidate& rhs) {
-                return lhs.clearance > rhs.clearance;
-              });
-
-    const size_t kMaxYawRepairTrials = std::min<size_t>(2, ranked.size());
-    for (size_t i = 0; i < kMaxYawRepairTrials; ++i) {
-      TopoWaypoint repaired = ranked[i].wp;
-      const auto trial_obstacles =
-          collectLocalObstacleSamples(obstacle_points_, repaired.pos, obstacle_radius + radial_step);
-      if (trial_obstacles.empty()) {
-        continue;
-      }
-      if (!tryRepairYaw(repaired, trial_obstacles)) {
-        continue;
-      }
-      const double clearance =
-          evaluator_.evaluate(SE2State(repaired.pos.x(), repaired.pos.y(), repaired.yaw));
-      if (clearance >= 0.0 && continuousFree(repaired)) {
-        candidate = repaired;
-        return true;
-      }
-    }
-
-    return false;
-  };
-
   for (int attempt = 0; attempt < 24; ++attempt) {
     const auto obstacles = collectLocalObstacleSamples(obstacle_points_, wp.pos, obstacle_radius);
     if (obstacles.empty()) {
@@ -744,21 +607,6 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
 
     if (violating.empty()) {
       return continuousFree(wp);
-    }
-
-    if (worst_dist < safe_dist - 2.0 * eps) {
-      TopoWaypoint searched = wp;
-      if (tryTranslationSearch(searched)) {
-        const auto searched_obstacles =
-            collectLocalObstacleSamples(obstacle_points_, searched.pos, obstacle_radius);
-        const double searched_worst = evaluateWorstDistance(searched, searched_obstacles);
-        const bool searched_free = continuousFree(searched);
-        wp = searched;
-        if (searched_free && searched_worst >= safe_dist) {
-          wp.has_yaw = true;
-          return true;
-        }
-      }
     }
 
     std::sort(violating.begin(), violating.end(),
@@ -797,12 +645,8 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
     if (!violating.empty()) {
       strongest_grad = rotateIntoWorld(violating.front().query.gradient, wp.yaw);
     }
-    Eigen::Vector2d fallback_dir = esdfAscentDirection(*map_, wp.pos, eps);
     if (grad_pos.norm() < 1e-9 && strongest_grad.norm() > 1e-9) {
       grad_pos = strongest_grad;
-    }
-    if (grad_pos.norm() < 1e-9 && fallback_dir.norm() > 1e-9) {
-      grad_pos = -fallback_dir;
     }
     if (grad_pos.norm() < 1e-9) {
       return false;
@@ -838,12 +682,7 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
     }
 
     if (!accepted) {
-      wp.pos += step_pos * dir;
-      wp.yaw = normalizeAngle(wp.yaw + yaw_step);
-      wp.has_yaw = true;
-      const auto updated_obstacles =
-          collectLocalObstacleSamples(obstacle_points_, wp.pos, obstacle_radius);
-      tryRepairYaw(wp, updated_obstacles);
+      return false;
     }
   }
 

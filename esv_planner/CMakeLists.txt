@@ -139,6 +139,16 @@ target_link_libraries(test_topology_body_push
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_topology_body_push_no_search
+  test/test_topology_body_push_no_search.cpp
+  ${ESV_TOPOLOGY_SOURCES}
+)
+
+target_link_libraries(test_topology_body_push_no_search
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_topology_fixed_case_clearance
   test/test_topology_fixed_case_clearance.cpp
   ${ESV_TOPOLOGY_SOURCES}
