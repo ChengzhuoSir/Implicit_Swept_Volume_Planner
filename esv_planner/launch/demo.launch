@@ -4,6 +4,7 @@
        and you want to load the bundled maze map -->
   <arg name="use_map_server" default="false" />
   <arg name="map_file" default="$(find esv_planner)/maps/maze.yaml" />
+  <arg name="strict_rebuild_case" default="" />
   <node if="$(arg use_map_server)"
         name="map_server"
         pkg="map_server"
@@ -12,7 +13,9 @@
         required="false" />
 
   <!-- ESV Planner -->
-  <include file="$(find esv_planner)/launch/planner.launch" />
+  <include file="$(find esv_planner)/launch/planner.launch">
+    <arg name="strict_rebuild_case" value="$(arg strict_rebuild_case)" />
+  </include>
 
   <!-- RViz -->
   <node name="rviz" pkg="rviz" type="rviz" args="-d $(find esv_planner)/config/demo.rviz"

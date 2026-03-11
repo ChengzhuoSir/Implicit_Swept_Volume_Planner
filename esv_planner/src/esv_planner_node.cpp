@@ -24,6 +24,46 @@
 
 namespace esv_planner {
 
+namespace {
+
+struct StrictRebuildCase {
+  const char* name;
+  SE2State start;
+  SE2State goal;
+};
+
+const StrictRebuildCase kStrictRebuildCases[] = {
+    {"fixed_case", SE2State(1.06, 7.55, -1.57), SE2State(8.97, 3.63, 1.52)},
+    {"secondary_case", SE2State(0.72, 5.31, 0.29), SE2State(9.14, 5.74, 1.64)},
+};
+
+const StrictRebuildCase* findStrictRebuildCase(const std::string& name) {
+  for (const auto& candidate : kStrictRebuildCases) {
+    if (name == candidate.name) {
+      return &candidate;
+    }
+  }
+  return nullptr;
+}
+
+bool matchesStrictRebuildState(const SE2State& lhs, const SE2State& rhs) {
+  return (lhs.position() - rhs.position()).norm() <= 1e-6 &&
+         std::abs(normalizeAngle(lhs.yaw - rhs.yaw)) <= 1e-6;
+}
+
+const StrictRebuildCase* matchStrictRebuildCase(const SE2State& start,
+                                                const SE2State& goal) {
+  for (const auto& candidate : kStrictRebuildCases) {
+    if (matchesStrictRebuildState(start, candidate.start) &&
+        matchesStrictRebuildState(goal, candidate.goal)) {
+      return &candidate;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 class EsvPlannerNode {
 public:
   EsvPlannerNode(ros::NodeHandle& nh, ros::NodeHandle& pnh) : nh_(nh), pnh_(pnh) {
@@ -53,7 +93,7 @@ private:
   TopologyPlanner topology_planner_;
   SE2SequenceGenerator se2_generator_;
   HybridAStarPlanner hybrid_astar_;
-  SvsdfEvaluator svsdf_evaluator_;
+  ContinuousSvsdfEvaluator svsdf_evaluator_;
   TrajectoryOptimizer optimizer_;
   OptimizerParams opt_params_;
   HybridAStarParams hybrid_params_;
@@ -69,6 +109,17 @@ private:
   double disc_step_;
   int yaw_bins_;
   int max_push_;
+  std::string strict_rebuild_case_;
+
+  void logStrictRebuildCase(const char* context) const {
+    const StrictRebuildCase* matched = matchStrictRebuildCase(start_, goal_);
+    if (!matched) return;
+    ROS_INFO("%s strict rebuild case '%s': start=(%.2f, %.2f, %.2f) goal=(%.2f, %.2f, %.2f)",
+             context,
+             matched->name,
+             matched->start.x, matched->start.y, matched->start.yaw,
+             matched->goal.x, matched->goal.y, matched->goal.yaw);
+  }
 
   void loadParams() {
     // Footprint
@@ -141,6 +192,18 @@ private:
     pnh_.param("goal_pose/yaw", gyaw, 1.57);
     start_ = SE2State(sx, sy, syaw);
     goal_ = SE2State(gx, gy, gyaw);
+    pnh_.param("strict_rebuild_case", strict_rebuild_case_, std::string(""));
+    if (!strict_rebuild_case_.empty()) {
+      if (const StrictRebuildCase* regression = findStrictRebuildCase(strict_rebuild_case_)) {
+        start_ = regression->start;
+        goal_ = regression->goal;
+        ROS_INFO("Loaded strict rebuild case '%s' from parameters.", regression->name);
+      } else {
+        ROS_WARN("Unknown strict_rebuild_case '%s'; keeping configured start/goal.",
+                 strict_rebuild_case_.c_str());
+      }
+    }
+    logStrictRebuildCase("Configured");
     trigger_state_.setDefaultStartGoalAvailable();
   }
 
@@ -180,6 +243,7 @@ private:
     start_.y = msg->pose.pose.position.y;
     start_.yaw = tf2::getYaw(msg->pose.pose.orientation);
     ROS_INFO("Start: (%.2f, %.2f, %.2f)", start_.x, start_.y, start_.yaw);
+    logStrictRebuildCase("Updated");
     trigger_state_.onStartUpdated();
     ROS_INFO("Start updated. Waiting for goal selection to plan.");
   }
@@ -189,6 +253,7 @@ private:
     goal_.y = msg->pose.position.y;
     goal_.yaw = tf2::getYaw(msg->pose.orientation);
     ROS_INFO("Goal: (%.2f, %.2f, %.2f)", goal_.x, goal_.y, goal_.yaw);
+    logStrictRebuildCase("Updated");
     if (trigger_state_.onGoalUpdated()) {
       tryPlan();
     }
@@ -198,6 +263,7 @@ private:
     if (!trigger_state_.canPlan()) return;
 
     ROS_INFO("=== ESV Planner: Starting planning ===");
+    logStrictRebuildCase("Planning");
     ros::Time t0 = ros::Time::now();
     std::vector<SE2State> hybrid_path;
 
@@ -317,12 +383,12 @@ private:
         return report;
       }
 
-      report.min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj, 0.05);
+      report.min_svsdf = svsdf_evaluator_.evaluateTrajectory(traj);
       report.dynamics_ok = optimizer_.dynamicsFeasible(
           traj, &report.max_vel, &report.max_acc, &report.max_yaw_rate);
       report.collision_free = (report.min_svsdf >= 0.0);
       report.margin_ok = (report.min_svsdf >= opt_params_.safety_margin);
-      report.accepted_by_current_gate = report.collision_free && report.dynamics_ok;
+      report.accepted_by_current_gate = report.margin_ok && report.dynamics_ok;
       return report;
     };
 
@@ -412,14 +478,6 @@ private:
         if (segments[si].risk == RiskLevel::HIGH) continue;
         Trajectory seg_traj = optimizer_.optimizeR2(segments[si].waypoints, seg_times[si]);
         if (seg_traj.empty()) {
-          ROS_INFO("  Path %zu low-risk segment %zu upgraded to SE(2) after optimizeR2 failure",
-                   pi, si);
-          seg_traj = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
-          if (!seg_traj.empty()) {
-            segments[si].risk = RiskLevel::HIGH;
-          }
-        }
-        if (seg_traj.empty()) {
           ROS_WARN("  Path %zu discarded: low-risk segment %zu optimizeR2 returned empty "
                    "(wps=%zu est_time=%.3f)", pi, si, segments[si].waypoints.size(), seg_times[si]);
           path_valid = false;
@@ -444,35 +502,6 @@ private:
       if (!valid) {
         ROS_WARN("  Path %zu full validation failed: %s", pi,
                  formatValidation(full_report).c_str());
-        // Paper-aligned fallback: if full trajectory is unsafe, upgrade R2 to SE(2).
-        bool fallback_ok = true;
-        for (size_t si = 0; si < segments.size(); ++si) {
-          if (segments[si].risk == RiskLevel::HIGH) continue;
-          Trajectory reopt = optimizer_.optimizeSE2(segments[si].waypoints, seg_times[si]);
-          if (reopt.empty()) {
-            ROS_WARN("  Path %zu fallback failed: low-risk segment %zu optimizeSE2 returned empty",
-                     pi, si);
-            fallback_ok = false;
-            break;
-          }
-          ValidationReport fallback_seg_report = inspectTrajectory(reopt);
-          if (fallback_seg_report.min_svsdf < 0.0) {
-            ROS_WARN("  Path %zu fallback failed: upgraded segment %zu infeasible: %s",
-                     pi, si, formatValidation(fallback_seg_report).c_str());
-            fallback_ok = false;
-            break;
-          }
-          seg_trajs[si] = reopt;
-        }
-
-        if (fallback_ok) {
-          full = optimizer_.stitch(segments, seg_trajs);
-          valid = validateTrajectory(full, &min_svsdf, &max_vel, &max_acc, &full_report);
-          if (!valid) {
-            ROS_WARN("  Path %zu fallback validation still failed: %s", pi,
-                     formatValidation(full_report).c_str());
-          }
-        }
       }
 
       if (valid) {
@@ -499,7 +528,7 @@ private:
           break;
         }
       } else {
-        ROS_WARN("  Path %zu discarded after validation/fallback", pi);
+        ROS_WARN("  Path %zu discarded after strict validation", pi);
       }
     }
 
@@ -524,11 +553,15 @@ private:
       accepted.resize(2);
     }
 
+    const size_t best_high_risk = accepted.front().high_risk_segments;
     std::vector<Trajectory> candidates;
     std::vector<std::vector<MotionSegment>> all_segments;
     candidates.reserve(accepted.size());
     all_segments.reserve(accepted.size());
     for (const auto& candidate : accepted) {
+      if (candidate.high_risk_segments != best_high_risk) {
+        break;
+      }
       candidates.push_back(candidate.traj);
       all_segments.push_back(candidate.segments);
     }

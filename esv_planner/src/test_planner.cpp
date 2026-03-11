@@ -17,7 +17,7 @@
 #include <esv_planner/collision_checker.h>
 #include <esv_planner/topology_planner.h>
 #include <esv_planner/se2_sequence_generator.h>
-#include <esv_planner/svsdf_evaluator.h>
+#include <esv_planner/continuous_svsdf_evaluator.h>
 #include <esv_planner/trajectory_optimizer.h>
 
 #include <fstream>
@@ -236,8 +236,8 @@ int main(int argc, char** argv)
   SE2SequenceGenerator se2gen;
   se2gen.init(grid_map, checker, /*disc_step=*/0.15, /*max_push=*/5);
 
-  // SvsdfEvaluator
-  SvsdfEvaluator svsdf;
+  // ContinuousSvsdfEvaluator
+  ContinuousSvsdfEvaluator svsdf;
   svsdf.init(grid_map, footprint);
 
   // TrajectoryOptimizer with default OptimizerParams
@@ -301,7 +301,7 @@ int main(int argc, char** argv)
                                 double* out_max_vel,
                                 double* out_max_acc) {
     if (traj.empty()) return false;
-    double min_svsdf = svsdf.evaluateTrajectory(traj, 0.05);
+    double min_svsdf = svsdf.evaluateTrajectory(traj);
     double max_vel = 0.0, max_acc = 0.0;
     double duration = traj.totalDuration();
     for (double t = 0.0; t <= duration; t += 0.02) {
@@ -314,7 +314,7 @@ int main(int argc, char** argv)
     if (out_max_vel) *out_max_vel = max_vel;
     if (out_max_acc) *out_max_acc = max_acc;
 
-    bool collision_ok = (min_svsdf >= 0.0);
+    bool collision_ok = (min_svsdf + 1e-6 >= opt_params.safety_margin);
     bool dynamics_ok = (max_vel <= opt_params.max_vel * 1.10) &&
                        (max_acc <= opt_params.max_acc * 1.10);
     return collision_ok && dynamics_ok;
@@ -384,22 +384,6 @@ int main(int argc, char** argv)
     Trajectory full_traj = optimizer.stitch(segments, seg_trajs);
     double min_svsdf_path = 0.0, max_vel_path = 0.0, max_acc_path = 0.0;
     bool valid = validateTrajectory(full_traj, &min_svsdf_path, &max_vel_path, &max_acc_path);
-    if (!valid) {
-      bool fallback_ok = true;
-      for (size_t si = 0; si < segments.size(); ++si) {
-        if (segments[si].risk == RiskLevel::HIGH) continue;
-        Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
-          fallback_ok = false;
-          break;
-        }
-        seg_trajs[si] = tr;
-      }
-      if (fallback_ok) {
-        full_traj = optimizer.stitch(segments, seg_trajs);
-        valid = validateTrajectory(full_traj, &min_svsdf_path, &max_vel_path, &max_acc_path);
-      }
-    }
 
     if (valid) {
       candidates.push_back(full_traj);
@@ -409,7 +393,7 @@ int main(int argc, char** argv)
                 << "  vmax=" << max_vel_path
                 << "  amax=" << max_acc_path << "\n";
     } else {
-      std::cout << "  [stage3] Trajectory: INVALID after validation/fallback\n";
+      std::cout << "  [stage3] Trajectory: INVALID after strict validation\n";
     }
   }
 
@@ -459,7 +443,7 @@ int main(int argc, char** argv)
   double dt_total_ms =
       std::chrono::duration<double, std::milli>(t_total_end - t_total_start).count();
 
-  bool pass = (min_svsdf >= 0.0) &&
+  bool pass = (min_svsdf + 1e-6 >= opt_params.safety_margin) &&
               (best_pieces > 0) &&
               (max_vel <= opt_params.max_vel * 1.10) &&
               (max_acc <= opt_params.max_acc * 1.10);

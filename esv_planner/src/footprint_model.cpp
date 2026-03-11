@@ -1,27 +1,9 @@
 #include "esv_planner/footprint_model.h"
 #include <cmath>
-#include <limits>
 
 namespace esv_planner {
 
 namespace {
-
-bool pointInPolygon(double px, double py,
-                    const std::vector<Eigen::Vector2d>& verts) {
-  bool inside = false;
-  const int n = static_cast<int>(verts.size());
-  for (int i = 0, j = n - 1; i < n; j = i++) {
-    const double yi = verts[i].y();
-    const double yj = verts[j].y();
-    const double xi = verts[i].x();
-    const double xj = verts[j].x();
-    if (((yi > py) != (yj > py)) &&
-        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
 
 }  // namespace
 
@@ -29,6 +11,7 @@ FootprintModel::FootprintModel() {}
 
 void FootprintModel::setPolygon(const std::vector<Eigen::Vector2d>& vertices) {
   vertices_ = vertices;
+  body_frame_sdf_.setPolygon(vertices);
   dense_sample_caches_.clear();
   computeCircumscribedRadius();
 }
@@ -42,34 +25,11 @@ void FootprintModel::computeCircumscribedRadius() {
 }
 
 double FootprintModel::bodyFrameSdf(const Eigen::Vector2d& point) const {
-  // Signed distance from point to polygon boundary
-  // Negative = inside, Positive = outside
-  if (vertices_.size() < 3) return std::numeric_limits<double>::infinity();
+  return body_frame_sdf_.signedDistance(point);
+}
 
-  int n = static_cast<int>(vertices_.size());
-  double min_dist = std::numeric_limits<double>::infinity();
-  bool inside = false;
-
-  for (int i = 0, j = n - 1; i < n; j = i++) {
-    const Eigen::Vector2d& vi = vertices_[i];
-    const Eigen::Vector2d& vj = vertices_[j];
-
-    // Ray casting for inside/outside
-    if (((vi.y() > point.y()) != (vj.y() > point.y())) &&
-        (point.x() < (vj.x() - vi.x()) * (point.y() - vi.y()) / (vj.y() - vi.y()) + vi.x())) {
-      inside = !inside;
-    }
-
-    // Distance to edge segment
-    Eigen::Vector2d edge = vj - vi;
-    double t = (point - vi).dot(edge) / edge.squaredNorm();
-    t = std::max(0.0, std::min(1.0, t));
-    Eigen::Vector2d closest = vi + t * edge;
-    double dist = (point - closest).norm();
-    if (dist < min_dist) min_dist = dist;
-  }
-
-  return inside ? -min_dist : min_dist;
+BodyFrameQuery FootprintModel::bodyFrameQuery(const Eigen::Vector2d& point) const {
+  return body_frame_sdf_.query(point);
 }
 
 std::vector<Eigen::Vector2d> FootprintModel::rotatedVertices(double yaw) const {
@@ -172,7 +132,8 @@ const std::vector<Eigen::Vector2d>& FootprintModel::denseBodySamples(
 
   for (double gx = bb_min_x + 0.5 * interior_spacing; gx <= bb_max_x; gx += interior_spacing) {
     for (double gy = bb_min_y + 0.5 * interior_spacing; gy <= bb_max_y; gy += interior_spacing) {
-      if (pointInPolygon(gx, gy, vertices_)) {
+      if (body_frame_sdf_detail::pointInsideByWinding(
+              Eigen::Vector2d(gx, gy), vertices_)) {
         cache.samples.emplace_back(gx, gy);
       }
     }

@@ -7,7 +7,7 @@
 #include <esv_planner/collision_checker.h>
 #include <esv_planner/topology_planner.h>
 #include <esv_planner/se2_sequence_generator.h>
-#include <esv_planner/svsdf_evaluator.h>
+#include <esv_planner/continuous_svsdf_evaluator.h>
 #include <esv_planner/trajectory_optimizer.h>
 
 #include <cstdint>
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
   SE2SequenceGenerator se2gen;
   se2gen.init(map, checker, 0.15, 5);
 
-  SvsdfEvaluator svsdf;
+  ContinuousSvsdfEvaluator svsdf;
   svsdf.init(map, footprint);
 
   TrajectoryOptimizer optimizer;
@@ -194,12 +194,12 @@ int main(int argc, char** argv) {
                                      seg_traj.yaw_pieces.end());
     }
     const double exact_concat_clearance =
-        svsdf.evaluateTrajectory(exact_concat, 0.05);
-    const double stitched_clearance = svsdf.evaluateTrajectory(stitched, 0.05);
+        svsdf.evaluateTrajectory(exact_concat);
+    const double stitched_clearance = svsdf.evaluateTrajectory(stitched);
     if (stitched_clearance < 0.0) continue;
 
     for (size_t si = 0; si < seg_trajs.size(); ++si) {
-      const double seg_clearance = svsdf.evaluateTrajectory(seg_trajs[si], 0.05);
+      const double seg_clearance = svsdf.evaluateTrajectory(seg_trajs[si]);
       if (seg_clearance < 0.0) {
         std::cout << "[test] inconsistency path=" << pi
                   << " seg=" << si

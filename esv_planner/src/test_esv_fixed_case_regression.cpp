@@ -7,7 +7,7 @@
 #include <esv_planner/collision_checker.h>
 #include <esv_planner/topology_planner.h>
 #include <esv_planner/se2_sequence_generator.h>
-#include <esv_planner/svsdf_evaluator.h>
+#include <esv_planner/continuous_svsdf_evaluator.h>
 #include <esv_planner/trajectory_optimizer.h>
 
 #include <algorithm>
@@ -18,6 +18,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <chrono>
 
 using namespace esv_planner;
 
@@ -28,7 +29,7 @@ struct FixedCaseReport {
   size_t accepted_candidates = 0;
   bool final_esv_valid = false;
   bool selected_candidate_found = false;
-  double best_topo_waypoint_clearance = -kInf;
+  double best_topo_clearance = -kInf;
   double best_sequence_chain_clearance = -kInf;
   double best_segment_optimized_clearance = -kInf;
   double best_r2_clearance = -kInf;
@@ -151,7 +152,7 @@ double segmentLength(const std::vector<SE2State>& wps) {
 }
 
 double waypointPathClearance(const std::vector<SE2State>& waypoints,
-                             const SvsdfEvaluator& svsdf) {
+                             const ContinuousSvsdfEvaluator& svsdf) {
   if (waypoints.empty()) return -kInf;
   double min_clearance = kInf;
   for (const auto& wp : waypoints) {
@@ -161,7 +162,7 @@ double waypointPathClearance(const std::vector<SE2State>& waypoints,
 }
 
 double continuousChainClearance(const std::vector<SE2State>& waypoints,
-                                const SvsdfEvaluator& svsdf,
+                                const ContinuousSvsdfEvaluator& svsdf,
                                 double sample_step) {
   if (waypoints.empty()) return -kInf;
   double min_clearance = kInf;
@@ -304,7 +305,7 @@ double maxBoundaryYawRateJump(const Trajectory& traj) {
 }
 
 double maxNearObstacleWaviness(const Trajectory& traj,
-                               const SvsdfEvaluator& svsdf,
+                               const ContinuousSvsdfEvaluator& svsdf,
                                double clearance_threshold,
                                double sample_step,
                                int* out_samples = nullptr) {
@@ -362,7 +363,7 @@ bool sameTrajectory(const Trajectory& a, const Trajectory& b) {
 }
 
 double topoPathClearance(const TopoPath& path,
-                         const SvsdfEvaluator& svsdf,
+                         const ContinuousSvsdfEvaluator& svsdf,
                          const SE2State& start,
                          const SE2State& goal) {
   if (path.waypoints.empty()) return -kInf;
@@ -379,7 +380,7 @@ double topoPathClearance(const TopoPath& path,
 }
 
 void printFirstCollidingWaypoint(const TopoPath& path,
-                                 const SvsdfEvaluator& svsdf,
+                                 const ContinuousSvsdfEvaluator& svsdf,
                                  const CollisionChecker& checker,
                                  const SE2State& start,
                                  const SE2State& goal) {
@@ -421,11 +422,11 @@ void printFirstCollidingWaypoint(const TopoPath& path,
 }
 
 bool trajectoryValid(const Trajectory& traj,
-                     const SvsdfEvaluator& svsdf,
+                     const ContinuousSvsdfEvaluator& svsdf,
                      const TrajectoryOptimizer& optimizer,
                      double* out_min_svsdf = nullptr) {
   if (traj.empty()) return false;
-  const double min_svsdf = svsdf.evaluateTrajectory(traj, 0.05);
+  const double min_svsdf = svsdf.evaluateTrajectory(traj);
   if (out_min_svsdf) *out_min_svsdf = min_svsdf;
   return min_svsdf >= 0.0 && optimizer.dynamicsFeasible(traj);
 }
@@ -459,7 +460,7 @@ FixedCaseReport runFixedCase() {
   SE2SequenceGenerator se2gen;
   se2gen.init(map, checker, 0.15, 5);
 
-  SvsdfEvaluator svsdf;
+  ContinuousSvsdfEvaluator svsdf;
   svsdf.init(map, footprint);
 
   OptimizerParams params;
@@ -482,10 +483,23 @@ FixedCaseReport runFixedCase() {
   const SE2State start(1.06, 7.55, -1.57);
   const SE2State goal(8.97, 3.63, 1.52);
 
+  const auto topo_t0 = std::chrono::steady_clock::now();
   topology.buildRoadmap(start.position(), goal.position());
+  const auto topo_t1 = std::chrono::steady_clock::now();
+  std::cout << "[test] build_roadmap_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(topo_t1 - topo_t0).count()
+            << std::endl;
   auto topo_paths = topology.searchPaths();
+  const auto topo_t2 = std::chrono::steady_clock::now();
+  std::cout << "[test] search_paths_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(topo_t2 - topo_t1).count()
+            << " topo_paths_raw=" << topo_paths.size() << std::endl;
   const auto raw_topo_paths = topo_paths;
   topology.shortenPaths(topo_paths);
+  const auto topo_t3 = std::chrono::steady_clock::now();
+  std::cout << "[test] shorten_paths_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(topo_t3 - topo_t2).count()
+            << " topo_paths_after=" << topo_paths.size() << std::endl;
   report.topo_paths = topo_paths.size();
   std::vector<AcceptedCandidateRecord> accepted_records;
   std::vector<size_t> topo_order(topo_paths.size());
@@ -522,7 +536,7 @@ FixedCaseReport runFixedCase() {
       raw_topo_clearance = topoPathClearance(raw_topo_paths[pi], svsdf, start, goal);
     }
     const double topo_clearance = topoPathClearance(topo_paths[pi], svsdf, start, goal);
-    report.best_topo_waypoint_clearance = std::max(report.best_topo_waypoint_clearance, topo_clearance);
+    report.best_topo_clearance = std::max(report.best_topo_clearance, topo_clearance);
     std::cout << "[test] path=" << pi
               << " raw_topo_waypoints=" << (pi < raw_topo_paths.size() ? raw_topo_paths[pi].waypoints.size() : 0)
               << " raw_topo_clearance=" << raw_topo_clearance
@@ -563,7 +577,7 @@ FixedCaseReport runFixedCase() {
         opt_result = optimizer.optimizeSE2Detailed(segments[si].waypoints, seg_times[si]);
         tr = opt_result.traj;
         if (!tr.empty()) {
-          min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
+          min_svsdf = svsdf.evaluateTrajectory(tr);
           report.best_se2_clearance = std::max(report.best_se2_clearance, min_svsdf);
           report.best_segment_optimized_clearance =
               std::max(report.best_segment_optimized_clearance, min_svsdf);
@@ -588,7 +602,7 @@ FixedCaseReport runFixedCase() {
           }
         }
         if (!tr.empty()) {
-          min_svsdf = svsdf.evaluateTrajectory(tr, 0.05);
+          min_svsdf = svsdf.evaluateTrajectory(tr);
           report.best_r2_clearance = std::max(report.best_r2_clearance, min_svsdf);
           report.best_segment_optimized_clearance =
               std::max(report.best_segment_optimized_clearance, min_svsdf);
@@ -611,7 +625,7 @@ FixedCaseReport runFixedCase() {
     Trajectory full = optimizer.stitch(segments, seg_trajs);
     double stitched_clearance = -kInf;
     if (!full.empty()) {
-      stitched_clearance = svsdf.evaluateTrajectory(full, 0.05);
+      stitched_clearance = svsdf.evaluateTrajectory(full);
       report.best_stitched_clearance = std::max(report.best_stitched_clearance, stitched_clearance);
     }
     std::cout << "[test]   stitched_clearance=" << stitched_clearance
@@ -626,7 +640,7 @@ FixedCaseReport runFixedCase() {
         Trajectory fallback_traj = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
         double fallback_clearance = -kInf;
         if (!fallback_traj.empty()) {
-          fallback_clearance = svsdf.evaluateTrajectory(fallback_traj, 0.05);
+          fallback_clearance = svsdf.evaluateTrajectory(fallback_traj);
         }
         std::cout << "[test]     fallback_se2_seg=" << si
                   << " clearance=" << fallback_clearance
@@ -760,7 +774,7 @@ int main(int argc, char** argv) {
             << " accepted_candidates=" << report.accepted_candidates
             << " final_esv_valid=" << (report.final_esv_valid ? 1 : 0)
             << " selected_candidate_found=" << (report.selected_candidate_found ? 1 : 0)
-            << " best_topo_clearance=" << report.best_topo_waypoint_clearance
+            << " best_topo_clearance=" << report.best_topo_clearance
             << " best_sequence_chain_clearance=" << report.best_sequence_chain_clearance
             << " best_segment_optimized_clearance=" << report.best_segment_optimized_clearance
             << " best_r2_clearance=" << report.best_r2_clearance

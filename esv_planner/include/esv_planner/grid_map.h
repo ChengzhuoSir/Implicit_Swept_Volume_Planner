@@ -1,6 +1,7 @@
 #pragma once
 
 #include <esv_planner/common.h>
+#include <esv_planner/geometry_map.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <Eigen/Dense>
 #include <vector>
@@ -40,6 +41,7 @@ public:
   const std::vector<int8_t>& occupancy() const { return occupancy_; }
   const std::vector<double>& esdf() const { return esdf_; }
   const std::vector<int8_t>& inflated() const { return inflated_; }
+  const GeometryMap& geometryMap() const { return geometry_map_; }
 
 private:
   int width_ = 0;
@@ -52,6 +54,7 @@ private:
   std::vector<int8_t> occupancy_;   // raw occupancy (-1=unknown, 0=free, 100=occupied)
   std::vector<int8_t> inflated_;    // inflated occupancy
   std::vector<double> esdf_;        // Euclidean signed distance field
+  GeometryMap geometry_map_;
 };
 
 }  // namespace esv_planner

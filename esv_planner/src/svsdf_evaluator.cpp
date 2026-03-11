@@ -5,6 +5,52 @@
 
 namespace esv_planner {
 
+namespace {
+
+double adaptiveTrajectoryClearance(const Trajectory& traj,
+                                   const SvsdfEvaluator& evaluator,
+                                   double t0,
+                                   double t1,
+                                   int depth,
+                                   int max_depth,
+                                   double max_linear_step,
+                                   double max_yaw_step) {
+  const SE2State s0 = traj.sample(t0);
+  const SE2State s1 = traj.sample(t1);
+  const double c0 = evaluator.evaluate(s0);
+  const double c1 = evaluator.evaluate(s1);
+  double min_clearance = std::min(c0, c1);
+
+  if (depth >= max_depth) {
+    return min_clearance;
+  }
+
+  const double linear_delta = (s1.position() - s0.position()).norm();
+  const double yaw_delta = std::abs(normalizeAngle(s1.yaw - s0.yaw));
+  const double tm = 0.5 * (t0 + t1);
+  const SE2State sm = traj.sample(tm);
+  const double cm = evaluator.evaluate(sm);
+  min_clearance = std::min(min_clearance, cm);
+
+  if (linear_delta <= max_linear_step && yaw_delta <= max_yaw_step) {
+    return min_clearance;
+  }
+
+  min_clearance = std::min(min_clearance,
+                           adaptiveTrajectoryClearance(traj, evaluator, t0, tm,
+                                                       depth + 1, max_depth,
+                                                       max_linear_step,
+                                                       max_yaw_step));
+  min_clearance = std::min(min_clearance,
+                           adaptiveTrajectoryClearance(traj, evaluator, tm, t1,
+                                                       depth + 1, max_depth,
+                                                       max_linear_step,
+                                                       max_yaw_step));
+  return min_clearance;
+}
+
+}  // namespace
+
 SvsdfEvaluator::SvsdfEvaluator() {}
 
 void SvsdfEvaluator::init(const GridMap& map, const FootprintModel& footprint) {
@@ -76,6 +122,23 @@ double SvsdfEvaluator::evaluateTrajectory(const Trajectory& traj, double dt) con
   }
 
   return min_dist;
+}
+
+double SvsdfEvaluator::evaluateTrajectory(const Trajectory& traj) const {
+  if (traj.empty()) {
+    return -kInf;
+  }
+
+  const double total = traj.totalDuration();
+  if (total <= 1e-9) {
+    return evaluate(traj.sample(0.0));
+  }
+
+  const double max_linear_step = std::max(map_->resolution(), 1e-3);
+  const double max_yaw_step = 0.15;
+  const int max_depth = 12;
+  return adaptiveTrajectoryClearance(traj, *this, 0.0, total, 0, max_depth,
+                                     max_linear_step, max_yaw_step);
 }
 
 void SvsdfEvaluator::gradient(const SE2State& state,

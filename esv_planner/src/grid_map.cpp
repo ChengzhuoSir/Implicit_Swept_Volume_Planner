@@ -85,6 +85,7 @@ void GridMap::fromOccupancyGrid(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
   ready_ = true;
 
   computeEsdf();
+  geometry_map_.rebuild(width_, height_, resolution_, origin_x_, origin_y_, inflated_);
 }
 
 GridIndex GridMap::worldToGrid(double wx, double wy) const {
@@ -139,6 +140,7 @@ void GridMap::inflateByRadius(double radius) {
   }
 
   computeEsdf();
+  geometry_map_.rebuild(width_, height_, resolution_, origin_x_, origin_y_, inflated_);
 }
 
 void GridMap::computeEsdf() {

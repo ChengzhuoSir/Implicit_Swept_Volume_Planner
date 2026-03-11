@@ -7,7 +7,7 @@
 #include <esv_planner/collision_checker.h>
 #include <esv_planner/topology_planner.h>
 #include <esv_planner/se2_sequence_generator.h>
-#include <esv_planner/svsdf_evaluator.h>
+#include <esv_planner/continuous_svsdf_evaluator.h>
 #include <esv_planner/trajectory_optimizer.h>
 
 #include <algorithm>
@@ -113,7 +113,7 @@ double segmentLength(const std::vector<SE2State>& wps) {
 }
 
 double segmentChainClearance(const std::vector<SE2State>& waypoints,
-                             const SvsdfEvaluator& svsdf,
+                             const ContinuousSvsdfEvaluator& svsdf,
                              double sample_step) {
   if (waypoints.empty()) return -kInf;
   double min_clearance = kInf;
@@ -140,7 +140,7 @@ double segmentChainClearance(const std::vector<SE2State>& waypoints,
 }
 
 double topoPathClearance(const TopoPath& path,
-                         const SvsdfEvaluator& svsdf,
+                         const ContinuousSvsdfEvaluator& svsdf,
                          const SE2State& start,
                          const SE2State& goal) {
   if (path.waypoints.empty()) return -kInf;
@@ -196,10 +196,10 @@ Trajectory buildLinearTrajectory(const std::vector<SE2State>& waypoints,
 }
 
 bool evaluateTrajectory(const Trajectory& traj,
-                        const SvsdfEvaluator& svsdf,
+                        const ContinuousSvsdfEvaluator& svsdf,
                         const OptimizerParams& params) {
   if (traj.empty()) return false;
-  double min_svsdf = svsdf.evaluateTrajectory(traj, 0.05);
+  double min_svsdf = svsdf.evaluateTrajectory(traj);
   double max_vel = 0.0;
   double max_acc = 0.0;
   double max_yaw_rate = 0.0;
@@ -220,7 +220,7 @@ bool evaluateTrajectory(const Trajectory& traj,
     }
   }
 
-  return min_svsdf >= 0.0 &&
+  return min_svsdf + 1e-6 >= params.safety_margin &&
          max_vel <= params.max_vel * 1.10 &&
          max_acc <= params.max_acc * 1.10 &&
          max_yaw_rate <= params.max_yaw_rate * 1.10;
@@ -230,7 +230,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
                               const SE2State& start,
                               const SE2State& goal,
                               SE2SequenceGenerator& se2gen,
-                              SvsdfEvaluator& svsdf,
+                              ContinuousSvsdfEvaluator& svsdf,
                               TrajectoryOptimizer& optimizer,
                               const OptimizerParams& params,
                               int& accepted_candidates,
@@ -285,7 +285,7 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
           std::max(0.5, segmentLength(seg.waypoints) / std::max(0.10, params.max_vel));
       const Trajectory linear_traj = buildLinearTrajectory(seg.waypoints, nominal_time);
       const double linear_clearance =
-          linear_traj.empty() ? -kInf : svsdf.evaluateTrajectory(linear_traj, 0.05);
+          linear_traj.empty() ? -kInf : svsdf.evaluateTrajectory(linear_traj);
       std::cout << "[test]   seg risk="
                 << (seg.risk == RiskLevel::HIGH ? "HIGH" : "LOW")
                 << " size=" << seg.waypoints.size()
@@ -310,6 +310,10 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
         ok = false;
         break;
       }
+      std::cout << "[test]   path=" << path_idx
+                << " high segment " << si
+                << " optimized_clearance=" << svsdf.evaluateTrajectory(tr)
+                << "\n";
       seg_trajs[si] = tr;
     }
     if (!ok) continue;
@@ -319,53 +323,25 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
       Trajectory tr = optimizer.optimizeR2(segments[si].waypoints, seg_times[si]);
       if (tr.empty()) {
         std::cout << "[test]   path=" << path_idx
-                  << " low segment " << si << " upgraded to SE2 after R2 failure\n";
-        tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-        if (!tr.empty()) {
-          segments[si].risk = RiskLevel::HIGH;
-        }
-      }
-      if (tr.empty()) {
-        std::cout << "[test]   path=" << path_idx
                   << " reject: low segment " << si << " produced empty R2 traj\n";
         ok = false;
         break;
       }
+      std::cout << "[test]   path=" << path_idx
+                << " low segment " << si
+                << " optimized_clearance=" << svsdf.evaluateTrajectory(tr)
+                << " risk_now=LOW"
+                << "\n";
       seg_trajs[si] = tr;
     }
     if (!ok) continue;
 
     Trajectory full = optimizer.stitch(segments, seg_trajs);
     bool valid = evaluateTrajectory(full, svsdf, params);
-    const double full_clearance = full.empty() ? -kInf : svsdf.evaluateTrajectory(full, 0.05);
+    const double full_clearance = full.empty() ? -kInf : svsdf.evaluateTrajectory(full);
     std::cout << "[test]   path=" << path_idx
               << " stitched_clearance=" << full_clearance
               << " stitched_valid=" << valid << "\n";
-    if (!valid) {
-      bool fallback_ok = true;
-      for (size_t si = 0; si < segments.size(); ++si) {
-        if (segments[si].risk == RiskLevel::HIGH) continue;
-        Trajectory tr = optimizer.optimizeSE2(segments[si].waypoints, seg_times[si]);
-        if (tr.empty() || svsdf.evaluateTrajectory(tr, 0.05) < 0.0) {
-          std::cout << "[test]   path=" << path_idx
-                    << " fallback failed on low segment " << si
-                    << " clearance="
-                    << (tr.empty() ? -kInf : svsdf.evaluateTrajectory(tr, 0.05)) << "\n";
-          fallback_ok = false;
-          break;
-        }
-        seg_trajs[si] = tr;
-      }
-      if (fallback_ok) {
-        full = optimizer.stitch(segments, seg_trajs);
-        valid = evaluateTrajectory(full, svsdf, params);
-        const double fallback_clearance =
-            full.empty() ? -kInf : svsdf.evaluateTrajectory(full, 0.05);
-        std::cout << "[test]   path=" << path_idx
-                  << " fallback_stitched_clearance=" << fallback_clearance
-                  << " fallback_valid=" << valid << "\n";
-      }
-    }
 
     if (valid) {
       accepted.push_back({full, path_high_risk_segments, full_clearance});
@@ -394,13 +370,16 @@ Trajectory runPaperAlignedEsv(const std::vector<TopoPath>& topo_paths,
             });
 
   const size_t retained_count = std::min<size_t>(2, accepted.size());
+  accepted_candidates = static_cast<int>(retained_count);
+  accepted_high_risk_segments = accepted.front().high_risk_segments;
+
   std::vector<Trajectory> candidates;
   candidates.reserve(retained_count);
-  accepted_candidates = static_cast<int>(retained_count);
-  accepted_high_risk_segments = 0;
   for (size_t i = 0; i < retained_count; ++i) {
+    if (accepted[i].high_risk_segments != accepted_high_risk_segments) {
+      break;
+    }
     candidates.push_back(accepted[i].traj);
-    accepted_high_risk_segments += accepted[i].high_risk_segments;
   }
 
   return optimizer.selectBest(candidates);
@@ -453,7 +432,7 @@ int main(int argc, char** argv) {
     SE2SequenceGenerator se2gen;
     se2gen.init(map, checker, 0.15, 5);
 
-    SvsdfEvaluator svsdf;
+    ContinuousSvsdfEvaluator svsdf;
     svsdf.init(map, footprint);
 
     OptimizerParams params;
@@ -479,6 +458,12 @@ int main(int argc, char** argv) {
               << " high_risk_segments=" << total_high_risk_segments
               << " accepted_high_risk_segments=" << accepted_high_risk_segments
               << " traj_empty=" << traj.empty() << "\n";
+    std::cout << "[test] summary robot=" << robot.name
+              << " topo_paths=" << paths.size()
+              << " accepted_candidates=" << accepted_candidates
+              << " high_risk_segments=" << total_high_risk_segments
+              << " accepted_high_risk_segments=" << accepted_high_risk_segments
+              << " final_traj_valid=" << (!traj.empty() ? 1 : 0) << "\n";
 
     if (accepted_candidates < 2) {
       std::cerr << "[test] FAIL: expected at least two accepted maze candidates for robot "

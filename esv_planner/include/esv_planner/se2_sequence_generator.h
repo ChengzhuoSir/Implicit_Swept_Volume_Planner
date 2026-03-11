@@ -3,8 +3,9 @@
 #include <esv_planner/common.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/collision_checker.h>
-#include <esv_planner/svsdf_evaluator.h>
+#include <esv_planner/continuous_feasibility.h>
 #include <vector>
+#include <memory>
 
 namespace esv_planner {
 
@@ -24,7 +25,7 @@ public:
 private:
   const GridMap* map_ = nullptr;
   const CollisionChecker* checker_ = nullptr;
-  SvsdfEvaluator svsdf_;
+  std::unique_ptr<ContinuousFeasibilityChecker> feasibility_;
   double disc_step_ = 0.15;
   int max_push_ = 5;
 
@@ -88,6 +89,12 @@ private:
   // Merge adjacent same-risk segments and compact short HIGH/LOW/HIGH
   // oscillations produced by local edge failures.
   std::vector<MotionSegment> compactSegments(
+      const std::vector<MotionSegment>& segments);
+
+  // Expand very small but still tight HIGH windows with one or two
+  // neighbouring LOW-context states so downstream SE(2) optimisation has
+  // enough room to recover the target margin.
+  std::vector<MotionSegment> expandTightHighSegments(
       const std::vector<MotionSegment>& segments);
 
   // Conservative acceptance check using the same piecewise linear state chain

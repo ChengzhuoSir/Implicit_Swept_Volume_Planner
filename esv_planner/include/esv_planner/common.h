@@ -56,31 +56,25 @@ struct PolyPiece {
   double duration = 1.0;  // time duration of this piece
 
   Eigen::Vector2d evaluate(double t) const {
-    Eigen::Vector2d p = Eigen::Vector2d::Zero();
-    double tn = 1.0;
-    for (int i = 0; i < 6; ++i) {
-      p += coeffs.col(i) * tn;
-      tn *= t;
+    Eigen::Vector2d p = coeffs.col(5);
+    for (int i = 4; i >= 0; --i) {
+      p = p * t + coeffs.col(i);
     }
     return p;
   }
 
   Eigen::Vector2d velocity(double t) const {
-    Eigen::Vector2d v = Eigen::Vector2d::Zero();
-    double tn = 1.0;
-    for (int i = 1; i < 6; ++i) {
-      v += coeffs.col(i) * (i * tn);
-      tn *= t;
+    Eigen::Vector2d v = 5.0 * coeffs.col(5);
+    for (int i = 4; i >= 1; --i) {
+      v = v * t + static_cast<double>(i) * coeffs.col(i);
     }
     return v;
   }
 
   Eigen::Vector2d acceleration(double t) const {
-    Eigen::Vector2d a = Eigen::Vector2d::Zero();
-    double tn = 1.0;
-    for (int i = 2; i < 6; ++i) {
-      a += coeffs.col(i) * (i * (i - 1) * tn);
-      tn *= t;
+    Eigen::Vector2d a = 20.0 * coeffs.col(5);
+    for (int i = 4; i >= 2; --i) {
+      a = a * t + static_cast<double>(i * (i - 1)) * coeffs.col(i);
     }
     return a;
   }
@@ -92,21 +86,17 @@ struct YawPolyPiece {
   double duration = 1.0;
 
   double evaluate(double t) const {
-    double val = 0.0;
-    double tn = 1.0;
-    for (int i = 0; i < 6; ++i) {
-      val += coeffs(0, i) * tn;
-      tn *= t;
+    double val = coeffs(0, 5);
+    for (int i = 4; i >= 0; --i) {
+      val = val * t + coeffs(0, i);
     }
     return val;
   }
 
   double velocity(double t) const {
-    double val = 0.0;
-    double tn = 1.0;
-    for (int i = 1; i < 6; ++i) {
-      val += coeffs(0, i) * i * tn;
-      tn *= t;
+    double val = 5.0 * coeffs(0, 5);
+    for (int i = 4; i >= 1; --i) {
+      val = val * t + coeffs(0, i) * static_cast<double>(i);
     }
     return val;
   }

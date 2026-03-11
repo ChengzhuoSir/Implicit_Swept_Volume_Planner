@@ -49,7 +49,7 @@ Trajectory makeStraightTrajectory(double y) {
 }
 
 double minClearance(const SvsdfEvaluator& svsdf, const Trajectory& traj) {
-  return svsdf.evaluateTrajectory(traj, 0.05);
+  return svsdf.evaluateTrajectory(traj);
 }
 
 double sampleY(const Trajectory& traj) {

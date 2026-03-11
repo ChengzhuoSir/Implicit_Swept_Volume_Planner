@@ -1,6 +1,0 @@
-Generated: /home/chengzhuo/workspace/plan/src/esv_planner/maps/maze.pgm
-Generated: /home/chengzhuo/workspace/plan/src/esv_planner/maps/maze.yaml
-$ python3 src/esv_planner/tools/generate_maze_map.py
-
-
-[exit_code] 0

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <esv_planner/body_frame_sdf.h>
 #include <esv_planner/common.h>
 #include <Eigen/Dense>
 #include <vector>
@@ -24,6 +25,10 @@ public:
   // Positive = outside, Negative = inside
   double bodyFrameSdf(const Eigen::Vector2d& point) const;
 
+  // Query signed distance, closest point, and gradient in the body frame.
+  BodyFrameQuery bodyFrameQuery(const Eigen::Vector2d& point) const;
+  const BodyFrameSdf& bodyFrameSdfModel() const { return body_frame_sdf_; }
+
   // Get polygon vertices
   const std::vector<Eigen::Vector2d>& vertices() const { return vertices_; }
 
@@ -46,6 +51,7 @@ private:
   };
 
   std::vector<Eigen::Vector2d> vertices_;
+  BodyFrameSdf body_frame_sdf_;
   double inscribed_radius_ = 0.1;
   double circumscribed_radius_ = 0.0;
   mutable std::vector<DenseSampleCache> dense_sample_caches_;

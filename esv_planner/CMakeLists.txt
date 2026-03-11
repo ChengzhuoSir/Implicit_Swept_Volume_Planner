@@ -38,6 +38,7 @@ add_executable(esv_planner_node
   src/se2_sequence_generator.cpp
   src/hybrid_astar.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -54,26 +55,11 @@ add_executable(test_planner
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
 target_link_libraries(test_planner
-  ${catkin_LIBRARIES}
-  ${EIGEN3_LIBRARIES}
-)
-
-add_executable(benchmark_planner
-  src/benchmark_planner.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
-)
-
-target_link_libraries(benchmark_planner
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
@@ -110,9 +96,38 @@ add_executable(test_topology_shortcut
   src/footprint_model.cpp
   src/collision_checker.cpp
   src/topology_planner.cpp
+  src/continuous_svsdf_evaluator.cpp
 )
 
 target_link_libraries(test_topology_shortcut
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_topology_body_push
+  src/test_topology_body_push.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+target_link_libraries(test_topology_body_push
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_topology_fixed_case_clearance
+  src/test_topology_fixed_case_clearance.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+target_link_libraries(test_topology_fixed_case_clearance
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
@@ -124,10 +139,45 @@ add_executable(test_motion_sequence
   src/collision_checker.cpp
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
+  src/continuous_feasibility.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
 )
 
 target_link_libraries(test_motion_sequence
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_low_high_semantics
+  src/test_low_high_semantics.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/continuous_feasibility.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+target_link_libraries(test_low_high_semantics
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_se2_fixed_case_fragmentation
+  src/test_se2_fixed_case_fragmentation.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+target_link_libraries(test_se2_fixed_case_fragmentation
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
@@ -140,6 +190,7 @@ add_executable(test_esv_pipeline_maze
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -156,6 +207,7 @@ add_executable(test_esv_fixed_case_regression
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -172,6 +224,7 @@ add_executable(test_svsdf_phase_consistency
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -190,11 +243,32 @@ target_link_libraries(test_grid_map_esdf
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_geometry_map
+  src/test_geometry_map.cpp
+  src/grid_map.cpp
+)
+
+target_link_libraries(test_geometry_map
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_body_frame_sdf
+  src/test_body_frame_sdf.cpp
+  src/footprint_model.cpp
+)
+
+target_link_libraries(test_body_frame_sdf
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_optimizer_r2_paper_semantics
   src/test_optimizer_r2_paper_semantics.cpp
   src/grid_map.cpp
   src/footprint_model.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -208,7 +282,21 @@ add_executable(test_optimizer_se2_time_refinement
   src/grid_map.cpp
   src/footprint_model.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
+)
+
+add_executable(test_continuous_svsdf_evaluator
+  src/test_continuous_svsdf_evaluator.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+target_link_libraries(test_continuous_svsdf_evaluator
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
 )
 
 target_link_libraries(test_optimizer_se2_time_refinement
@@ -221,6 +309,7 @@ add_executable(test_optimizer_select_best_clearance
   src/grid_map.cpp
   src/footprint_model.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
@@ -237,10 +326,79 @@ add_executable(test_optimizer_se2_fixed_high_segments
   src/topology_planner.cpp
   src/se2_sequence_generator.cpp
   src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
 )
 
 target_link_libraries(test_optimizer_se2_fixed_high_segments
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_optimizer_se2_fixed_large_high_segment
+  src/test_optimizer_se2_fixed_large_high_segment.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_optimizer_se2_fixed_large_high_segment
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_stitch_seam_connector
+  src/test_stitch_seam_connector.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_stitch_seam_connector
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_optimizer_se2_maze_t_high_segment
+  src/test_optimizer_se2_maze_t_high_segment.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_optimizer_se2_maze_t_high_segment
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
+add_executable(test_optimizer_se2_maze_l_path1_high_segment
+  src/test_optimizer_se2_maze_l_path1_high_segment.cpp
+  src/grid_map.cpp
+  src/footprint_model.cpp
+  src/collision_checker.cpp
+  src/topology_planner.cpp
+  src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+  src/trajectory_optimizer.cpp
+)
+
+target_link_libraries(test_optimizer_se2_maze_l_path1_high_segment
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )

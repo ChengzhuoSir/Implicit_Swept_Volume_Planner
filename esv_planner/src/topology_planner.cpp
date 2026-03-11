@@ -38,6 +38,30 @@ void assignTangentYaw(std::vector<TopoWaypoint>& waypoints) {
   }
 }
 
+void assignMissingYaw(std::vector<TopoWaypoint>& waypoints) {
+  if (waypoints.empty()) return;
+  if (waypoints.size() == 1) {
+    if (!waypoints.front().has_yaw) {
+      waypoints.front().yaw = 0.0;
+      waypoints.front().has_yaw = true;
+    }
+    return;
+  }
+
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    if (waypoints[i].has_yaw) continue;
+    Eigen::Vector2d dir = (i + 1 < waypoints.size())
+        ? (waypoints[i + 1].pos - waypoints[i].pos)
+        : (waypoints[i].pos - waypoints[i - 1].pos);
+    if (dir.norm() < 1e-9) {
+      waypoints[i].yaw = (i > 0 && waypoints[i - 1].has_yaw) ? waypoints[i - 1].yaw : 0.0;
+    } else {
+      waypoints[i].yaw = std::atan2(dir.y(), dir.x());
+    }
+    waypoints[i].has_yaw = true;
+  }
+}
+
 double interpolateWaypointYaw(const TopoWaypoint& a, const TopoWaypoint& b, double t) {
   double yaw_a = a.has_yaw ? a.yaw : std::atan2((b.pos - a.pos).y(), (b.pos - a.pos).x());
   double yaw_b = b.has_yaw ? b.yaw : yaw_a;
@@ -54,6 +78,10 @@ TopoWaypoint withIncomingYaw(const TopoWaypoint& from, const TopoWaypoint& to) {
   }
   out.has_yaw = true;
   return out;
+}
+
+TopoWaypoint withExistingOrIncomingYaw(const TopoWaypoint& from, const TopoWaypoint& to) {
+  return to.has_yaw ? to : withIncomingYaw(from, to);
 }
 
 Eigen::Vector2d esdfAscentDirection(const GridMap& map,
@@ -87,6 +115,51 @@ Eigen::Vector2d esdfAscentDirection(const GridMap& map,
   return best;
 }
 
+bool isOccupiedValue(int8_t val) {
+  return val > 50 || val < 0;
+}
+
+Eigen::Vector2d rotateIntoBody(const Eigen::Vector2d& world_delta, double yaw) {
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  return Eigen::Vector2d(c * world_delta.x() + s * world_delta.y(),
+                         -s * world_delta.x() + c * world_delta.y());
+}
+
+Eigen::Vector2d rotateIntoWorld(const Eigen::Vector2d& body_vec, double yaw) {
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  return Eigen::Vector2d(c * body_vec.x() - s * body_vec.y(),
+                         s * body_vec.x() + c * body_vec.y());
+}
+
+std::vector<Eigen::Vector2d> collectLocalObstacleSamples(
+    const std::vector<Eigen::Vector2d>& obstacle_points,
+    const Eigen::Vector2d& center,
+    double radius) {
+  std::vector<std::pair<double, Eigen::Vector2d>> ranked;
+  const double r2 = radius * radius;
+  ranked.reserve(obstacle_points.size());
+  for (const auto& world : obstacle_points) {
+    const double dist2 = (world - center).squaredNorm();
+    if (dist2 <= r2) {
+      ranked.emplace_back(dist2, world);
+    }
+  }
+  std::sort(ranked.begin(), ranked.end(),
+            [](const std::pair<double, Eigen::Vector2d>& lhs,
+               const std::pair<double, Eigen::Vector2d>& rhs) {
+              return lhs.first < rhs.first;
+            });
+  const size_t max_points = 96;
+  std::vector<Eigen::Vector2d> samples;
+  samples.reserve(std::min(max_points, ranked.size()));
+  for (size_t i = 0; i < ranked.size() && i < max_points; ++i) {
+    samples.push_back(ranked[i].second);
+  }
+  return samples;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -118,6 +191,14 @@ void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker,
   knn_ = knn;
   max_paths_ = max_paths;
   inscribed_radius_ = inscribed_radius;
+  evaluator_.init(map, checker.footprint());
+
+  obstacle_points_.clear();
+  const auto& boundary_points = map.geometryMap().boundaryCellCenters();
+  obstacle_points_.reserve(boundary_points.size());
+  obstacle_points_.insert(obstacle_points_.end(),
+                          boundary_points.begin(),
+                          boundary_points.end());
 }
 
 // ---------------------------------------------------------------------------
@@ -440,58 +521,346 @@ static double findCollisionT(const Eigen::Vector2d& a, const Eigen::Vector2d& b,
 // ---------------------------------------------------------------------------
 bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
                                              double safe_dist) const {
-  const auto boundary = checker_->footprint().sampleBoundary(wp.yaw, map_->resolution() * 0.5);
-  if (boundary.empty()) return false;
+  const FootprintModel& footprint = checker_->footprint();
+  const double eps = map_->resolution();
+  const double obstacle_extent = 0.5 * std::sqrt(2.0) * map_->resolution();
+  const double obstacle_radius =
+      footprint.circumscribedRadius() + safe_dist + 2.5 * map_->resolution();
+  const double yaw_eps = 0.05;
+  const double center_clearance = map_->getEsdf(wp.pos.x(), wp.pos.y());
+  auto continuousFree = [&](const TopoWaypoint& candidate) {
+    const GridIndex gi = map_->worldToGrid(candidate.pos.x(), candidate.pos.y());
+    if (!map_->isInside(gi.x, gi.y)) {
+      return false;
+    }
+    return evaluator_.evaluate(
+               SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw)) >= 0.0;
+  };
+  if (center_clearance >= obstacle_radius &&
+      continuousFree(wp)) {
+    wp.has_yaw = true;
+    return true;
+  }
 
-  double eps = map_->resolution();
-  for (int attempt = 0; attempt < 24; ++attempt) {
-    double min_dist = kInf;
-    Eigen::Vector2d worst_world = wp.pos;
+  auto tryRepairYaw = [&](TopoWaypoint& candidate,
+                          const std::vector<Eigen::Vector2d>& candidate_obstacles) {
+    (void)candidate_obstacles;
+    double best_clearance = -kInf;
+    double best_yaw = candidate.yaw;
+    bool found = false;
+    constexpr int kYawSamples = 12;
+    for (int k = 0; k < kYawSamples; ++k) {
+      const double yaw =
+          normalizeAngle(candidate.yaw + kTwoPi * static_cast<double>(k) /
+                                             static_cast<double>(kYawSamples));
+      const double clearance =
+          evaluator_.evaluate(SE2State(candidate.pos.x(), candidate.pos.y(), yaw));
+      if (!found || clearance > best_clearance) {
+        found = true;
+        best_clearance = clearance;
+        best_yaw = yaw;
+      }
+      if (clearance >= 0.0) {
+        best_yaw = yaw;
+        best_clearance = clearance;
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      candidate.yaw = best_yaw;
+      candidate.has_yaw = true;
+    }
+    return found;
+  };
 
-    for (const auto& sample : boundary) {
-      Eigen::Vector2d world = wp.pos + sample;
-      double dist = map_->getEsdf(world.x(), world.y());
-      if (dist < min_dist) {
-        min_dist = dist;
-        worst_world = world;
+  auto evaluateWorstDistance = [&](const TopoWaypoint& candidate,
+                                   const std::vector<Eigen::Vector2d>& candidate_obstacles) {
+    double candidate_worst = kInf;
+    for (const auto& obs_world : candidate_obstacles) {
+      const Eigen::Vector2d body_point =
+          rotateIntoBody(obs_world - candidate.pos, candidate.yaw);
+      candidate_worst = std::min(candidate_worst,
+                                 footprint.bodyFrameSdf(body_point) - obstacle_extent);
+    }
+    return candidate_worst;
+  };
+
+  auto tryTranslationSearch = [&](TopoWaypoint& candidate) {
+    auto normalizedOrZero = [](const Eigen::Vector2d& v) {
+      return v.norm() > 1e-9 ? v.normalized() : Eigen::Vector2d::Zero();
+    };
+    auto appendDirection = [](std::vector<Eigen::Vector2d>& dirs,
+                              const Eigen::Vector2d& dir) {
+      if (dir.norm() < 1e-9) return;
+      const Eigen::Vector2d unit = dir.normalized();
+      for (const auto& existing : dirs) {
+        if (std::abs(existing.dot(unit)) > 0.985) {
+          return;
+        }
+      }
+      dirs.push_back(unit);
+    };
+
+    const auto candidate_obstacles =
+        collectLocalObstacleSamples(obstacle_points_, candidate.pos, obstacle_radius);
+    if (candidate_obstacles.empty()) {
+      return false;
+    }
+
+    double worst_dist = kInf;
+    Eigen::Vector2d worst_grad_world = Eigen::Vector2d::Zero();
+    Eigen::Vector2d nearest_obstacle_dir = Eigen::Vector2d::Zero();
+    double nearest_obstacle_dist2 = kInf;
+    for (const auto& obs_world : candidate_obstacles) {
+      const Eigen::Vector2d body_point = rotateIntoBody(obs_world - candidate.pos, candidate.yaw);
+      const BodyFrameQuery query = footprint.bodyFrameSdfModel().query(body_point);
+      const double effective_dist = query.signed_distance - obstacle_extent;
+      if (effective_dist < worst_dist) {
+        worst_dist = effective_dist;
+        worst_grad_world = rotateIntoWorld(query.gradient, candidate.yaw);
+      }
+      const Eigen::Vector2d rel = obs_world - candidate.pos;
+      const double dist2 = rel.squaredNorm();
+      if (dist2 < nearest_obstacle_dist2 && dist2 > 1e-12) {
+        nearest_obstacle_dist2 = dist2;
+        nearest_obstacle_dir = rel.normalized();
       }
     }
 
-    if (min_dist >= safe_dist && checker_->isFree(SE2State(wp.pos.x(), wp.pos.y(), wp.yaw))) {
+    std::vector<Eigen::Vector2d> dirs;
+    const Eigen::Vector2d primary = normalizedOrZero(-worst_grad_world);
+    appendDirection(dirs, primary);
+    appendDirection(dirs, -primary);
+    if (primary.norm() > 1e-9) {
+      appendDirection(dirs, Eigen::Vector2d(-primary.y(), primary.x()));
+      appendDirection(dirs, Eigen::Vector2d(primary.y(), -primary.x()));
+    }
+    appendDirection(dirs, normalizedOrZero(-nearest_obstacle_dir));
+    appendDirection(dirs, normalizedOrZero(esdfAscentDirection(*map_, candidate.pos, eps)));
+
+    struct TrialCandidate {
+      TopoWaypoint wp;
+      double clearance = -kInf;
+    };
+
+    std::vector<TrialCandidate> ranked;
+    ranked.reserve(dirs.size() * 2);
+    const double radial_step = std::max(map_->resolution(), 0.5 * safe_dist);
+    for (double radius_scale : {1.0, 2.0}) {
+      const double radius = radius_scale * radial_step;
+      for (const auto& dir : dirs) {
+        TopoWaypoint trial(candidate.pos + radius * dir);
+        trial.yaw = candidate.yaw;
+        trial.has_yaw = true;
+        const double clearance =
+            evaluator_.evaluate(SE2State(trial.pos.x(), trial.pos.y(), trial.yaw));
+        if (clearance >= 0.0) {
+          candidate = trial;
+          return true;
+        }
+        ranked.push_back({trial, clearance});
+      }
+    }
+
+    if (ranked.empty()) {
+      return false;
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const TrialCandidate& lhs, const TrialCandidate& rhs) {
+                return lhs.clearance > rhs.clearance;
+              });
+
+    const size_t kMaxYawRepairTrials = std::min<size_t>(2, ranked.size());
+    for (size_t i = 0; i < kMaxYawRepairTrials; ++i) {
+      TopoWaypoint repaired = ranked[i].wp;
+      const auto trial_obstacles =
+          collectLocalObstacleSamples(obstacle_points_, repaired.pos, obstacle_radius + radial_step);
+      if (trial_obstacles.empty()) {
+        continue;
+      }
+      if (!tryRepairYaw(repaired, trial_obstacles)) {
+        continue;
+      }
+      const double clearance =
+          evaluator_.evaluate(SE2State(repaired.pos.x(), repaired.pos.y(), repaired.yaw));
+      if (clearance >= 0.0 && continuousFree(repaired)) {
+        candidate = repaired;
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  for (int attempt = 0; attempt < 24; ++attempt) {
+    const auto obstacles = collectLocalObstacleSamples(obstacle_points_, wp.pos, obstacle_radius);
+    if (obstacles.empty()) {
+      return continuousFree(wp);
+    }
+
+    struct ObstacleInfo {
+      Eigen::Vector2d world;
+      BodyFrameQuery query;
+      double effective_dist = kInf;
+    };
+
+    std::vector<ObstacleInfo> violating;
+    violating.reserve(obstacles.size());
+    double worst_dist = kInf;
+    for (const auto& obs_world : obstacles) {
+      const Eigen::Vector2d body_point = rotateIntoBody(obs_world - wp.pos, wp.yaw);
+      const BodyFrameQuery query = footprint.bodyFrameSdfModel().query(body_point);
+      const double effective_dist = query.signed_distance - obstacle_extent;
+      worst_dist = std::min(worst_dist, effective_dist);
+      if (effective_dist < safe_dist) {
+        violating.push_back({obs_world, query, effective_dist});
+      }
+    }
+
+    if (worst_dist >= safe_dist &&
+        continuousFree(wp)) {
       wp.has_yaw = true;
       return true;
     }
 
-    Eigen::Vector2d grad = esdfAscentDirection(*map_, worst_world, eps);
-    double grad_norm = grad.norm();
-    if (grad_norm < 1e-9) {
-      grad = esdfAscentDirection(*map_, wp.pos, eps);
-      grad_norm = grad.norm();
+    if (violating.empty()) {
+      return continuousFree(wp);
     }
-    if (grad_norm < 1e-9) return false;
 
-    double deficit = safe_dist - min_dist;
-    double push = std::min(std::max(eps, deficit + eps), 4.0 * eps);
-    wp.pos += push * grad / grad_norm;
-    wp.has_yaw = true;
+    if (worst_dist < safe_dist - 2.0 * eps) {
+      TopoWaypoint searched = wp;
+      if (tryTranslationSearch(searched)) {
+        const auto searched_obstacles =
+            collectLocalObstacleSamples(obstacle_points_, searched.pos, obstacle_radius);
+        const double searched_worst = evaluateWorstDistance(searched, searched_obstacles);
+        const bool searched_free = continuousFree(searched);
+        wp = searched;
+        if (searched_free && searched_worst >= safe_dist) {
+          wp.has_yaw = true;
+          return true;
+        }
+      }
+    }
+
+    std::sort(violating.begin(), violating.end(),
+              [](const ObstacleInfo& lhs, const ObstacleInfo& rhs) {
+                return lhs.effective_dist < rhs.effective_dist;
+              });
+
+    double objective = 0.0;
+    Eigen::Vector2d grad_pos = Eigen::Vector2d::Zero();
+    double grad_yaw = 0.0;
+    const size_t max_active = 16;
+    const double active_band = worst_dist + 0.05;
+    for (size_t i = 0; i < violating.size() && i < max_active; ++i) {
+      const auto& info = violating[i];
+      if (info.effective_dist > active_band) break;
+
+      const double pen = safe_dist - info.effective_dist;
+      objective += pen * pen;
+      grad_pos += 2.0 * pen * rotateIntoWorld(info.query.gradient, wp.yaw);
+
+      const Eigen::Vector2d body_plus =
+          rotateIntoBody(info.world - wp.pos, wp.yaw + yaw_eps);
+      const Eigen::Vector2d body_minus =
+          rotateIntoBody(info.world - wp.pos, wp.yaw - yaw_eps);
+      const double d_plus = footprint.bodyFrameSdf(body_plus);
+      const double d_minus = footprint.bodyFrameSdf(body_minus);
+      const double dsd_yaw = (d_plus - d_minus) / (2.0 * yaw_eps);
+      grad_yaw += -2.0 * pen * dsd_yaw;
+    }
+
+    if (objective < 1e-12) {
+      return continuousFree(wp);
+    }
+
+    Eigen::Vector2d strongest_grad = Eigen::Vector2d::Zero();
+    if (!violating.empty()) {
+      strongest_grad = rotateIntoWorld(violating.front().query.gradient, wp.yaw);
+    }
+    Eigen::Vector2d fallback_dir = esdfAscentDirection(*map_, wp.pos, eps);
+    if (grad_pos.norm() < 1e-9 && strongest_grad.norm() > 1e-9) {
+      grad_pos = strongest_grad;
+    }
+    if (grad_pos.norm() < 1e-9 && fallback_dir.norm() > 1e-9) {
+      grad_pos = -fallback_dir;
+    }
+    if (grad_pos.norm() < 1e-9) {
+      return false;
+    }
+
+    const Eigen::Vector2d dir = -grad_pos.normalized();
+    const double step_pos =
+        std::min(std::max(eps, 0.5 * (safe_dist - std::min(worst_dist, safe_dist))), 4.0 * eps);
+    const double yaw_step =
+        std::max(-0.12, std::min(0.12, -0.05 * grad_yaw));
+
+    bool accepted = false;
+    for (double scale : {1.0, 0.5, 0.25}) {
+      TopoWaypoint candidate = wp;
+      candidate.pos += scale * step_pos * dir;
+      candidate.yaw = normalizeAngle(candidate.yaw + scale * yaw_step);
+      candidate.has_yaw = true;
+
+      const auto candidate_obstacles =
+          collectLocalObstacleSamples(obstacle_points_, candidate.pos, obstacle_radius);
+      const double candidate_worst =
+          evaluateWorstDistance(candidate, candidate_obstacles);
+
+      const bool candidate_free =
+          checker_->isFree(SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw)) ||
+          tryRepairYaw(candidate, candidate_obstacles);
+
+      if (candidate_worst + 1e-6 >= worst_dist && candidate_free) {
+        wp = candidate;
+        accepted = true;
+        break;
+      }
+    }
+
+    if (!accepted) {
+      wp.pos += step_pos * dir;
+      wp.yaw = normalizeAngle(wp.yaw + yaw_step);
+      wp.has_yaw = true;
+      const auto updated_obstacles =
+          collectLocalObstacleSamples(obstacle_points_, wp.pos, obstacle_radius);
+      tryRepairYaw(wp, updated_obstacles);
+    }
   }
 
-  return checker_->isFree(SE2State(wp.pos.x(), wp.pos.y(), wp.yaw));
+  return continuousFree(wp);
 }
 
 bool TopologyPlanner::configurationLineFree(const TopoWaypoint& a, const TopoWaypoint& b) const {
-  Eigen::Vector2d delta = b.pos - a.pos;
-  double dist = delta.norm();
-  int n_steps = std::max(2, static_cast<int>(std::ceil(dist / (map_->resolution() * 0.5))) + 1);
-  double yaw = b.has_yaw ? b.yaw : std::atan2(delta.y(), delta.x());
-  for (int i = 0; i < n_steps; ++i) {
-    double t = static_cast<double>(i) / static_cast<double>(n_steps - 1);
-    Eigen::Vector2d p = a.pos + t * delta;
-    if (!checker_->isFree(SE2State(p.x(), p.y(), yaw))) {
-      return false;
-    }
+  return configurationClearance(a, b) >= 0.0;
+}
+
+double TopologyPlanner::configurationClearance(const TopoWaypoint& a,
+                                               const TopoWaypoint& b) const {
+  const double yaw_a =
+      a.has_yaw ? a.yaw : std::atan2((b.pos - a.pos).y(), (b.pos - a.pos).x());
+  const double yaw_b =
+      b.has_yaw ? b.yaw : std::atan2((b.pos - a.pos).y(), (b.pos - a.pos).x());
+  const Eigen::Vector2d delta = b.pos - a.pos;
+  const double len = delta.norm();
+  const double yaw_delta = std::abs(normalizeAngle(yaw_b - yaw_a));
+  const int linear_steps = std::max(
+      1, static_cast<int>(std::ceil(len / std::max(map_->resolution(), 0.10))));
+  const int yaw_steps = std::max(
+      1, static_cast<int>(std::ceil(yaw_delta / 0.10)));
+  const int n_steps = std::max(linear_steps, yaw_steps);
+  double min_clearance = kInf;
+  for (int i = 0; i <= n_steps; ++i) {
+    const double t = static_cast<double>(i) / static_cast<double>(n_steps);
+    SE2State sample;
+    sample.x = a.pos.x() + delta.x() * t;
+    sample.y = a.pos.y() + delta.y() * t;
+    sample.yaw = normalizeAngle(yaw_a + normalizeAngle(yaw_b - yaw_a) * t);
+    min_clearance = std::min(min_clearance, evaluator_.evaluate(sample));
   }
-  return true;
+  return min_clearance;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,20 +927,641 @@ static std::vector<TopoWaypoint> discretizePath(
 void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
   double safe_dist = inscribed_radius_;
   double res = map_->resolution();
+  const double shortcut_res = std::max(res, 0.10);
+
+  const size_t shorten_budget = 6;
+  if (paths.size() > shorten_budget) {
+    std::stable_sort(paths.begin(), paths.end(),
+                     [](const TopoPath& lhs, const TopoPath& rhs) {
+                       return lhs.length < rhs.length;
+                     });
+    paths.resize(shorten_budget);
+  }
 
   for (auto& path : paths) {
     if (path.waypoints.size() <= 2) continue;
+    const bool have_graph_endpoints = nodes_.size() >= 2;
 
-    // Densify first so obstacle-adjacent segments are repaired at resolution scale.
-    std::vector<TopoWaypoint> discrete = discretizePath(path.waypoints, res);
+    std::vector<TopoWaypoint> discrete = path.waypoints;
+    bool chain_repaired = false;
     assignTangentYaw(discrete);
     for (size_t k = 1; k + 1 < discrete.size(); ++k) {
       TopoWaypoint adjusted = withIncomingYaw(discrete[k - 1], discrete[k]);
-      if (pushPointFromObstacle(adjusted, safe_dist)) {
-        discrete[k] = withIncomingYaw(discrete[k - 1], adjusted);
+      const Eigen::Vector2d original_pos = adjusted.pos;
+      const double original_yaw = adjusted.yaw;
+      const double center_clearance = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
+      const SE2State adjusted_state(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw);
+      const double body_clearance = evaluator_.evaluate(adjusted_state);
+      const double coarse_threshold =
+          checker_->footprint().circumscribedRadius() + safe_dist + map_->resolution();
+      if ((center_clearance < coarse_threshold ||
+           body_clearance < 0.0 ||
+           !checker_->isFree(adjusted_state))) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+          if (!pushPointFromObstacle(adjusted, safe_dist)) {
+            break;
+          }
+          const SE2State repaired_state(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw);
+          if (checker_->isFree(repaired_state) &&
+              evaluator_.evaluate(repaired_state) >= 0.0) {
+            break;
+          }
+        }
+        discrete[k] = adjusted;
+        if ((adjusted.pos - original_pos).norm() > 1e-6 ||
+            std::abs(normalizeAngle(adjusted.yaw - original_yaw)) > 1e-6) {
+          chain_repaired = true;
+        }
       }
     }
-    assignTangentYaw(discrete);
+
+    std::vector<TopoWaypoint> dense_safe;
+    dense_safe.reserve(discrete.size() * 2);
+    dense_safe.push_back(discrete.front());
+
+    std::function<bool(const TopoWaypoint&, const TopoWaypoint&, int)> append_bridge =
+        [&](const TopoWaypoint& from, const TopoWaypoint& raw_target, int depth) -> bool {
+      TopoWaypoint target = withExistingOrIncomingYaw(from, raw_target);
+      if (configurationLineFree(from, target)) {
+        dense_safe.push_back(target);
+        return true;
+      }
+
+      TopoWaypoint pushed = target;
+      if (pushPointFromObstacle(pushed, safe_dist) &&
+          configurationLineFree(from, pushed)) {
+        dense_safe.push_back(pushed);
+        if ((pushed.pos - target.pos).norm() > 1e-6 ||
+            std::abs(normalizeAngle(pushed.yaw - target.yaw)) > 1e-6) {
+          chain_repaired = true;
+        }
+        return true;
+      }
+
+      if (depth >= 4 || (target.pos - from.pos).norm() < shortcut_res * 0.75) {
+        return false;
+      }
+
+      TopoWaypoint mid(from.pos + 0.5 * (target.pos - from.pos));
+      mid.yaw = interpolateWaypointYaw(from, target, 0.5);
+      mid.has_yaw = true;
+      if (!pushPointFromObstacle(mid, safe_dist)) {
+        return false;
+      }
+      if (!configurationLineFree(from, mid)) {
+        return false;
+      }
+
+      dense_safe.push_back(mid);
+      chain_repaired = true;
+      return append_bridge(mid, target, depth + 1);
+    };
+
+    for (size_t k = 1; k < discrete.size(); ++k) {
+      if (!append_bridge(dense_safe.back(), discrete[k], 0)) {
+        dense_safe.clear();
+        break;
+      }
+    }
+
+    if (dense_safe.size() >= 2) {
+      discrete = std::move(dense_safe);
+      if (shortcut_res > res + 1e-9) {
+        discrete = discretizePath(discrete, shortcut_res);
+        assignMissingYaw(discrete);
+      }
+    }
+
+    auto finalizeChain = [&](std::vector<TopoWaypoint> result,
+                             const std::vector<TopoWaypoint>& reference_tail) {
+      std::function<bool(const TopoWaypoint&, const TopoWaypoint&, int,
+                         std::vector<TopoWaypoint>&)> buildBridgeChain =
+          [&](const TopoWaypoint& from, const TopoWaypoint& raw_target, int depth,
+              std::vector<TopoWaypoint>& bridge) -> bool {
+        TopoWaypoint target = withExistingOrIncomingYaw(from, raw_target);
+        if (configurationLineFree(from, target)) {
+          bridge.push_back(target);
+          return true;
+        }
+
+        if (depth >= 3 || (target.pos - from.pos).norm() < shortcut_res * 0.75) {
+          return false;
+        }
+
+        TopoWaypoint pushed = target;
+        if (pushPointFromObstacle(pushed, safe_dist) &&
+            configurationLineFree(from, pushed)) {
+          bridge.push_back(pushed);
+          return true;
+        }
+
+        TopoWaypoint mid(from.pos + 0.5 * (target.pos - from.pos));
+        mid.yaw = interpolateWaypointYaw(from, target, 0.5);
+        mid.has_yaw = true;
+        if (!pushPointFromObstacle(mid, safe_dist) ||
+            !configurationLineFree(from, mid)) {
+          return false;
+        }
+        bridge.push_back(mid);
+        return buildBridgeChain(mid, target, depth + 1, bridge);
+      };
+
+      auto tryRepairEdgeWindow =
+          [&](std::vector<TopoWaypoint>& chain, size_t edge_end_idx) -> bool {
+        if (edge_end_idx == 0 || edge_end_idx >= chain.size()) {
+          return false;
+        }
+        const TopoWaypoint from = chain[edge_end_idx - 1];
+        TopoWaypoint target = withExistingOrIncomingYaw(from, chain[edge_end_idx]);
+        if (configurationLineFree(from, target)) {
+          chain[edge_end_idx] = target;
+          return true;
+        }
+        if ((target.pos - from.pos).norm() < shortcut_res * 0.75) {
+          return false;
+        }
+
+        TopoWaypoint mid(from.pos + 0.5 * (target.pos - from.pos));
+        mid.yaw = interpolateWaypointYaw(from, target, 0.5);
+        mid.has_yaw = true;
+        if (!pushPointFromObstacle(mid, safe_dist)) {
+          return false;
+        }
+        if (!configurationLineFree(from, mid) ||
+            !configurationLineFree(mid, target)) {
+          return false;
+        }
+
+        chain.insert(chain.begin() + static_cast<long>(edge_end_idx), mid);
+        return true;
+      };
+
+      auto tryBypassWaypoint =
+          [&](std::vector<TopoWaypoint>& chain, size_t idx) -> bool {
+        if (idx == 0 || idx + 1 >= chain.size()) {
+          return false;
+        }
+        const TopoWaypoint from = chain[idx - 1];
+        const size_t max_span = std::min(chain.size() - idx - 1, static_cast<size_t>(3));
+        for (size_t span = 1; span <= max_span; ++span) {
+          const TopoWaypoint to = chain[idx + span];
+          std::vector<TopoWaypoint> bridge;
+          if (!buildBridgeChain(from, to, 0, bridge) || bridge.empty()) {
+            continue;
+          }
+          chain.erase(chain.begin() + static_cast<long>(idx),
+                      chain.begin() + static_cast<long>(idx + span));
+          if (bridge.size() > 1) {
+            chain.insert(chain.begin() + static_cast<long>(idx),
+                         bridge.begin(), bridge.end() - 1);
+          }
+          return true;
+        }
+        return false;
+      };
+
+      auto tryResidualWindowSearch =
+          [&](std::vector<TopoWaypoint>& chain, size_t idx) -> bool {
+        if (idx == 0 || idx + 1 >= chain.size()) {
+          return false;
+        }
+        const TopoWaypoint prev = chain[idx - 1];
+        const TopoWaypoint next = chain[idx + 1];
+        TopoWaypoint seed = withIncomingYaw(prev, chain[idx]);
+        const double base_score =
+            evaluator_.evaluate(SE2State(seed.pos.x(), seed.pos.y(), seed.yaw));
+        TopoWaypoint best = seed;
+        double best_score = base_score;
+        bool found = false;
+
+        const int radial_rings = 3;
+        const int angular_samples = 12;
+        const int yaw_samples = 8;
+        const double radial_step = std::max(map_->resolution(), 0.5 * safe_dist);
+
+        for (int ring = 0; ring <= radial_rings; ++ring) {
+          const double radius = ring * radial_step;
+          const int dir_samples = (ring == 0) ? 1 : angular_samples;
+          for (int aidx = 0; aidx < dir_samples; ++aidx) {
+            const double theta =
+                (dir_samples == 1) ? 0.0 : kTwoPi * static_cast<double>(aidx) /
+                                              static_cast<double>(dir_samples);
+            for (int yidx = 0; yidx < yaw_samples; ++yidx) {
+              const double yaw_offset =
+                  (yidx == 0) ? 0.0 :
+                  (kTwoPi * static_cast<double>(yidx - yaw_samples / 2) /
+                   static_cast<double>(yaw_samples));
+              TopoWaypoint trial(seed.pos.x() + radius * std::cos(theta),
+                                 seed.pos.y() + radius * std::sin(theta));
+              trial.yaw = normalizeAngle(seed.yaw + yaw_offset);
+              trial.has_yaw = true;
+
+              const double state_score =
+                  evaluator_.evaluate(SE2State(trial.pos.x(), trial.pos.y(), trial.yaw));
+              if (state_score < best_score - 1e-6) {
+                continue;
+              }
+              if (!found || state_score > best_score) {
+                found = true;
+                best = trial;
+                best_score = state_score;
+              }
+              if (state_score >= 0.0 &&
+                  configurationLineFree(prev, trial) &&
+                  configurationLineFree(trial, withExistingOrIncomingYaw(trial, next))) {
+                chain[idx] = trial;
+                return true;
+              }
+            }
+          }
+        }
+
+        if (found && best_score > base_score + 1e-6 &&
+            configurationLineFree(prev, best) &&
+            configurationLineFree(best, withExistingOrIncomingYaw(best, next))) {
+          chain[idx] = best;
+          return true;
+        }
+        return false;
+      };
+
+      auto tryAnchoredWindowSearch =
+          [&](const TopoWaypoint& prev,
+              const TopoWaypoint& next,
+              TopoWaypoint& seed) -> bool {
+        TopoWaypoint best = seed;
+        double best_score =
+            evaluator_.evaluate(SE2State(seed.pos.x(), seed.pos.y(), seed.yaw));
+        const int radial_rings = 3;
+        const int angular_samples = 12;
+        const int yaw_samples = 8;
+        const double radial_step = std::max(map_->resolution(), 0.5 * safe_dist);
+
+        for (int ring = 0; ring <= radial_rings; ++ring) {
+          const double radius = ring * radial_step;
+          const int dir_samples = (ring == 0) ? 1 : angular_samples;
+          for (int aidx = 0; aidx < dir_samples; ++aidx) {
+            const double theta =
+                (dir_samples == 1) ? 0.0 : kTwoPi * static_cast<double>(aidx) /
+                                              static_cast<double>(dir_samples);
+            for (int yidx = 0; yidx < yaw_samples; ++yidx) {
+              const double yaw_offset =
+                  (yidx == 0) ? 0.0 :
+                  (kTwoPi * static_cast<double>(yidx - yaw_samples / 2) /
+                   static_cast<double>(yaw_samples));
+              TopoWaypoint trial(seed.pos.x() + radius * std::cos(theta),
+                                 seed.pos.y() + radius * std::sin(theta));
+              trial.yaw = normalizeAngle(seed.yaw + yaw_offset);
+              trial.has_yaw = true;
+              const double state_score =
+                  evaluator_.evaluate(SE2State(trial.pos.x(), trial.pos.y(), trial.yaw));
+              if (state_score > best_score) {
+                best_score = state_score;
+                best = trial;
+              }
+              if (state_score >= 0.0 &&
+                  configurationLineFree(prev, trial) &&
+                  configurationLineFree(trial, withExistingOrIncomingYaw(trial, next))) {
+                seed = trial;
+                return true;
+              }
+            }
+          }
+        }
+
+        if (best_score > evaluator_.evaluate(SE2State(seed.pos.x(), seed.pos.y(), seed.yaw)) &&
+            configurationLineFree(prev, best) &&
+            configurationLineFree(best, withExistingOrIncomingYaw(best, next))) {
+          seed = best;
+          return true;
+        }
+        return false;
+      };
+
+      for (int repair_pass = 0; repair_pass < 4; ++repair_pass) {
+        bool changed = false;
+        assignMissingYaw(result);
+        for (size_t k = 1; k + 1 < result.size(); ++k) {
+          TopoWaypoint candidate = withIncomingYaw(result[k - 1], result[k]);
+          const double state_clearance =
+              evaluator_.evaluate(SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw));
+          const double incoming_clearance = configurationClearance(result[k - 1], candidate);
+          if (state_clearance >= 0.0 && incoming_clearance >= 0.0) {
+            result[k] = candidate;
+            continue;
+          }
+
+          if (pushPointFromObstacle(candidate, safe_dist) &&
+              configurationLineFree(result[k - 1], candidate)) {
+            result[k] = candidate;
+            changed = true;
+            continue;
+          }
+
+          if (tryBypassWaypoint(result, k)) {
+            changed = true;
+            break;
+          }
+
+          if ((state_clearance < -0.02 || incoming_clearance < -0.02) &&
+              tryResidualWindowSearch(result, k)) {
+            changed = true;
+            break;
+          }
+
+          if (tryRepairEdgeWindow(result, k)) {
+            changed = true;
+            break;
+          }
+        }
+
+        if (!changed) {
+          for (size_t k = 1; k < result.size(); ++k) {
+            if (configurationLineFree(result[k - 1],
+                                      withExistingOrIncomingYaw(result[k - 1], result[k]))) {
+              continue;
+            }
+            if (tryRepairEdgeWindow(result, k)) {
+              changed = true;
+              break;
+            }
+          }
+        }
+
+        if (!changed) {
+          break;
+        }
+      }
+
+      if (!reference_tail.empty() &&
+          (result.back().pos - reference_tail.back().pos).norm() > 1e-6) {
+        TopoWaypoint tail = withExistingOrIncomingYaw(result.back(), reference_tail.back());
+        if (configurationLineFree(result.back(), tail)) {
+          result.push_back(tail);
+        } else {
+          TopoWaypoint repaired_tail = tail;
+          if (pushPointFromObstacle(repaired_tail, safe_dist) &&
+              configurationLineFree(result.back(), repaired_tail)) {
+            result.push_back(repaired_tail);
+          }
+        }
+      }
+
+      for (size_t k = 1; k + 1 < result.size(); ++k) {
+        TopoWaypoint adjusted = result[k];
+        if (!adjusted.has_yaw) {
+          adjusted = withIncomingYaw(result[k - 1], adjusted);
+        }
+        if (pushPointFromObstacle(adjusted, safe_dist)) {
+          result[k] = adjusted;
+        }
+      }
+      assignMissingYaw(result);
+
+      for (size_t k = 1; k + 1 < result.size();) {
+        TopoWaypoint merged = withIncomingYaw(result[k - 1], result[k + 1]);
+        if (lineCollisionFree(result[k - 1].pos, merged.pos) &&
+            configurationLineFree(result[k - 1], merged)) {
+          result.erase(result.begin() + static_cast<long>(k));
+          assignMissingYaw(result);
+          continue;
+        }
+        ++k;
+      }
+
+      for (size_t k = 1; k < result.size(); ++k) {
+        TopoWaypoint candidate = result[k];
+        if (!candidate.has_yaw) {
+          candidate = withIncomingYaw(result[k - 1], candidate);
+        }
+        const bool incoming_free =
+            checker_->isFree(SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw));
+        const bool incoming_line_free = configurationLineFree(result[k - 1], candidate);
+        if (incoming_free && incoming_line_free) {
+          result[k] = candidate;
+          continue;
+        }
+
+        TopoWaypoint incoming_candidate = withIncomingYaw(result[k - 1], result[k]);
+        if (k + 1 < result.size()) {
+          if (pushPointFromObstacle(candidate, safe_dist) &&
+              configurationLineFree(result[k - 1], candidate)) {
+            result[k] = candidate;
+            continue;
+          }
+          if (pushPointFromObstacle(incoming_candidate, safe_dist) &&
+              configurationLineFree(result[k - 1], incoming_candidate)) {
+            result[k] = incoming_candidate;
+            continue;
+          }
+        }
+      }
+      assignMissingYaw(result);
+
+      for (int cleanup_pass = 0; cleanup_pass < 4; ++cleanup_pass) {
+        bool changed = false;
+        for (size_t k = 1; k + 1 < result.size(); ++k) {
+          TopoWaypoint candidate = withIncomingYaw(result[k - 1], result[k]);
+          const double state_clearance =
+              evaluator_.evaluate(SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw));
+          if (state_clearance >= 0.0) {
+            result[k] = candidate;
+            continue;
+          }
+          if (tryBypassWaypoint(result, k)) {
+            changed = true;
+            break;
+          }
+          if (tryResidualWindowSearch(result, k)) {
+            changed = true;
+            break;
+          }
+          if (pushPointFromObstacle(candidate, safe_dist) &&
+              configurationLineFree(result[k - 1], candidate) &&
+              configurationLineFree(candidate, withExistingOrIncomingYaw(candidate, result[k + 1]))) {
+            result[k] = candidate;
+            changed = true;
+            break;
+          }
+        }
+        assignMissingYaw(result);
+        if (!changed) {
+          break;
+        }
+      }
+      if (have_graph_endpoints &&
+          result.size() > 2 &&
+          (result.front().pos - nodes_.front()).norm() < 0.5 * map_->resolution()) {
+        result.erase(result.begin());
+      }
+      if (have_graph_endpoints &&
+          result.size() > 2 &&
+          (result.back().pos - nodes_[1]).norm() < 0.5 * map_->resolution()) {
+        result.pop_back();
+      }
+      assignMissingYaw(result);
+
+      if (have_graph_endpoints && !result.empty()) {
+        TopoWaypoint start_anchor(nodes_.front());
+        start_anchor.yaw = std::atan2((result.front().pos - start_anchor.pos).y(),
+                                      (result.front().pos - start_anchor.pos).x());
+        start_anchor.has_yaw = true;
+        TopoWaypoint first = withIncomingYaw(start_anchor, result.front());
+        const double first_clearance =
+            evaluator_.evaluate(SE2State(first.pos.x(), first.pos.y(), first.yaw));
+        if (first_clearance < 0.0) {
+          if (pushPointFromObstacle(first, safe_dist) &&
+              configurationLineFree(start_anchor, first)) {
+            result.front() = first;
+          } else if (result.size() > 1) {
+            bool bridged = false;
+            const size_t max_span = std::min(result.size() - 1, static_cast<size_t>(3));
+            for (size_t span = 1; span <= max_span; ++span) {
+              std::vector<TopoWaypoint> bridge;
+              if (!buildBridgeChain(start_anchor, result[span], 0, bridge) || bridge.empty()) {
+                continue;
+              }
+              result.erase(result.begin(), result.begin() + static_cast<long>(span));
+              if (bridge.size() > 1) {
+                result.insert(result.begin(), bridge.begin(), bridge.end() - 1);
+              }
+              bridged = true;
+              break;
+            }
+            if (!bridged) {
+              TopoWaypoint searched = first;
+              if (tryAnchoredWindowSearch(start_anchor, result[1], searched)) {
+                result.front() = searched;
+              }
+            }
+          }
+        }
+      }
+
+      if (have_graph_endpoints && !result.empty()) {
+        TopoWaypoint goal_anchor(nodes_[1]);
+        goal_anchor.yaw = std::atan2((goal_anchor.pos - result.back().pos).y(),
+                                     (goal_anchor.pos - result.back().pos).x());
+        goal_anchor.has_yaw = true;
+        const size_t last_idx = result.size() - 1;
+        TopoWaypoint last = result[last_idx];
+        if (!last.has_yaw && last_idx > 0) {
+          last = withIncomingYaw(result[last_idx - 1], last);
+        }
+        const double last_clearance =
+            evaluator_.evaluate(SE2State(last.pos.x(), last.pos.y(), last.yaw));
+        if (last_clearance < 0.0) {
+          const bool incoming_ok =
+              (last_idx == 0) ? true : configurationLineFree(result[last_idx - 1], last);
+          if (pushPointFromObstacle(last, safe_dist) && incoming_ok) {
+            result[last_idx] = last;
+          } else if (last_idx > 0) {
+            bool bridged = false;
+            const size_t max_span = std::min(last_idx + 1, static_cast<size_t>(3));
+            for (size_t span = 1; span <= max_span; ++span) {
+              const size_t from_idx = last_idx - (span - 1);
+              if (from_idx == 0) {
+                continue;
+              }
+              std::vector<TopoWaypoint> bridge;
+              if (!buildBridgeChain(result[from_idx - 1], goal_anchor, 0, bridge) ||
+                  bridge.empty()) {
+                continue;
+              }
+              result.erase(result.begin() + static_cast<long>(from_idx), result.end());
+              if (bridge.size() > 1) {
+                result.insert(result.end(), bridge.begin(), bridge.end() - 1);
+              }
+              bridged = true;
+              break;
+            }
+            if (!bridged) {
+              TopoWaypoint searched = last;
+              if (tryAnchoredWindowSearch(result[last_idx - 1], goal_anchor, searched)) {
+                result[last_idx] = searched;
+              }
+            }
+          }
+        }
+      }
+      assignMissingYaw(result);
+      return result;
+    };
+
+    auto lightweightFinalizeChain = [&](std::vector<TopoWaypoint> result,
+                                        const std::vector<TopoWaypoint>& reference_tail) {
+      if (result.empty()) {
+        return result;
+      }
+
+      if (!reference_tail.empty() &&
+          (result.back().pos - reference_tail.back().pos).norm() > 1e-6) {
+        result.push_back(withExistingOrIncomingYaw(result.back(), reference_tail.back()));
+      }
+
+      if (have_graph_endpoints &&
+          result.size() > 2 &&
+          (result.front().pos - nodes_.front()).norm() < 0.5 * map_->resolution()) {
+        result.erase(result.begin());
+      }
+      if (have_graph_endpoints &&
+          result.size() > 2 &&
+          (result.back().pos - nodes_[1]).norm() < 0.5 * map_->resolution()) {
+        result.pop_back();
+      }
+
+      assignMissingYaw(result);
+
+      for (size_t k = 1; k + 1 < result.size(); ++k) {
+        TopoWaypoint adjusted = withIncomingYaw(result[k - 1], result[k]);
+        if (pushPointFromObstacle(adjusted, safe_dist)) {
+          result[k] = adjusted;
+        } else {
+          result[k] = adjusted;
+        }
+      }
+      assignMissingYaw(result);
+
+      for (size_t k = 1; k + 1 < result.size();) {
+        TopoWaypoint merged = withIncomingYaw(result[k - 1], result[k + 1]);
+        if (lineCollisionFree(result[k - 1].pos, merged.pos) &&
+            configurationLineFree(result[k - 1], merged)) {
+          result.erase(result.begin() + static_cast<long>(k));
+          assignMissingYaw(result);
+          continue;
+        }
+        ++k;
+      }
+
+      return result;
+    };
+
+    for (int pass = 0; pass < 2; ++pass) {
+      bool changed = false;
+      for (size_t k = 1; k + 1 < discrete.size(); ++k) {
+        TopoWaypoint candidate = withIncomingYaw(discrete[k - 1], discrete[k]);
+        const double clearance = evaluator_.evaluate(
+            SE2State(candidate.pos.x(), candidate.pos.y(), candidate.yaw));
+        if (clearance >= 0.0) {
+          discrete[k] = candidate;
+          continue;
+        }
+        if (pushPointFromObstacle(candidate, safe_dist)) {
+          discrete[k] = candidate;
+          changed = true;
+        }
+      }
+      assignMissingYaw(discrete);
+      if (!changed) {
+        break;
+      }
+    }
+
+    if (discrete.size() >= 2) {
+      path.waypoints = lightweightFinalizeChain(discrete, discrete);
+      path.computeLength();
+      continue;
+    }
 
     std::vector<TopoWaypoint> result;
     result.push_back(discrete.front());
@@ -586,7 +1576,10 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       size_t best_j = i + 1;
       bool found_long_shortcut = false;
       for (size_t j = discrete.size() - 1; j > i + 1; --j) {
-        TopoWaypoint candidate = withIncomingYaw(anchor, discrete[j]);
+        TopoWaypoint candidate = withExistingOrIncomingYaw(anchor, discrete[j]);
+        if (!lineCollisionFree(anchor.pos, candidate.pos)) {
+          continue;
+        }
         if (configurationLineFree(anchor, candidate)) {
           best_j = j;
           found_long_shortcut = true;
@@ -595,12 +1588,13 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       }
 
       if (found_long_shortcut) {
-        result.push_back(withIncomingYaw(anchor, discrete[best_j]));
+        TopoWaypoint appended = withExistingOrIncomingYaw(anchor, discrete[best_j]);
+        result.push_back(appended);
         i = best_j;
         continue;
       }
 
-      const TopoWaypoint next = withIncomingYaw(anchor, discrete[i + 1]);
+      const TopoWaypoint next = withExistingOrIncomingYaw(anchor, discrete[i + 1]);
       if (configurationLineFree(anchor, next)) {
         result.push_back(next);
         i += 1;
@@ -613,52 +1607,58 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
         continue;
       }
 
-      const size_t target_j = std::min(discrete.size() - 1, i + 3);
-      TopoWaypoint target = withIncomingYaw(anchor, discrete[target_j]);
-      double t_col = findCollisionT(anchor.pos, target.pos, *map_, safe_dist);
-      if (t_col < 0.0) {
-        t_col = 0.5;
+      bool inserted_repair = false;
+      for (size_t target_j = std::min(discrete.size() - 1, i + 3); target_j > i; --target_j) {
+        TopoWaypoint target = withExistingOrIncomingYaw(anchor, discrete[target_j]);
+        double t_col = findCollisionT(anchor.pos, target.pos, *map_, safe_dist);
+        if (t_col < 0.0) {
+          t_col = 0.5;
+        }
+
+        TopoWaypoint pushed_wp(anchor.pos + t_col * (target.pos - anchor.pos));
+        pushed_wp = withIncomingYaw(anchor, pushed_wp);
+        if (pushPointFromObstacle(pushed_wp, safe_dist) &&
+            lineCollisionFree(anchor.pos, pushed_wp.pos) &&
+            configurationLineFree(anchor, pushed_wp) &&
+            (pushed_wp.pos - anchor.pos).norm() > res * 0.50) {
+          result.push_back(pushed_wp);
+          ++inserted_pushes;
+          inserted_repair = true;
+          break;
+        }
+
+        if (target_j == i + 1) {
+          break;
+        }
       }
 
-      TopoWaypoint pushed_wp(anchor.pos + t_col * (target.pos - anchor.pos));
-      pushed_wp = withIncomingYaw(anchor, pushed_wp);
-      if (pushPointFromObstacle(pushed_wp, safe_dist) &&
-          (pushed_wp = withIncomingYaw(anchor, pushed_wp), true) &&
-          configurationLineFree(anchor, pushed_wp) &&
-          (pushed_wp.pos - anchor.pos).norm() > res * 0.75) {
-        result.push_back(pushed_wp);
-        ++inserted_pushes;
+      if (inserted_repair) {
         continue;
       }
 
-      result.push_back(next);
+      TopoWaypoint repaired_next = next;
+      if (pushPointFromObstacle(repaired_next, safe_dist) &&
+          configurationLineFree(anchor, repaired_next)) {
+        result.push_back(repaired_next);
+        i += 1;
+        continue;
+      }
+
+      // Do not keep a colliding dense sample in the final path. Advance the
+      // source cursor and let the current anchor try the next waypoint instead.
       i += 1;
     }
 
-    if ((result.back().pos - discrete.back().pos).norm() > 1e-6) {
-      result.push_back(withIncomingYaw(result.back(), discrete.back()));
+    if (result.size() < 2 && discrete.size() >= 2) {
+      result = discrete;
+    }
+    result = lightweightFinalizeChain(result, discrete);
+    if (result.size() < 2 && discrete.size() >= 2) {
+      result = discrete;
+      assignMissingYaw(result);
     }
 
-    for (size_t k = 1; k + 1 < result.size(); ++k) {
-      TopoWaypoint adjusted = withIncomingYaw(result[k - 1], result[k]);
-      if (pushPointFromObstacle(adjusted, safe_dist)) {
-        result[k] = withIncomingYaw(result[k - 1], adjusted);
-      }
-    }
-    assignTangentYaw(result);
-
-    // Final pruning with the segment-yaw semantics used downstream.
-    for (size_t k = 1; k + 1 < result.size();) {
-      TopoWaypoint merged = withIncomingYaw(result[k - 1], result[k + 1]);
-      if (configurationLineFree(result[k - 1], merged)) {
-        result.erase(result.begin() + static_cast<long>(k));
-        assignTangentYaw(result);
-        continue;
-      }
-      ++k;
-    }
-
-    path.waypoints = result;
+    path.waypoints = std::move(result);
     path.computeLength();
   }
 
@@ -672,6 +1672,10 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
     if (static_cast<int>(filtered.size()) >= max_paths_) break;
   }
   paths = filtered;
+}
+
+bool TopologyPlanner::repairWaypointBodyFrame(TopoWaypoint& wp, double safe_dist) const {
+  return pushPointFromObstacle(wp, safe_dist);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 #pragma once
 
 #include <esv_planner/common.h>
+#include <esv_planner/continuous_collision_evaluator.h>
 #include <esv_planner/grid_map.h>
-#include <esv_planner/svsdf_evaluator.h>
 #include <vector>
 
 namespace esv_planner {
@@ -48,7 +48,7 @@ class TrajectoryOptimizer {
 public:
   TrajectoryOptimizer();
 
-  void init(const GridMap& map, const SvsdfEvaluator& svsdf,
+  void init(const GridMap& map, const ContinuousCollisionEvaluator& svsdf,
             const OptimizerParams& params);
 
   // Optimize SE(2) sub-problem (high-risk segments) — Eq. (3)
@@ -86,7 +86,7 @@ public:
 
 private:
   const GridMap* map_ = nullptr;
-  const SvsdfEvaluator* svsdf_ = nullptr;
+  const ContinuousCollisionEvaluator* svsdf_ = nullptr;
   OptimizerParams params_;
 
   // MINCO: fit quintic polynomial pieces through waypoints with C² continuity
