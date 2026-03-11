@@ -1017,18 +1017,25 @@ std::vector<MotionSegment> SE2SequenceGenerator::generateCoreSegments(
 
 std::vector<MotionSegment> SE2SequenceGenerator::finalizeSegments(
     const std::vector<MotionSegment>& segments) {
-  return expandTightHighSegments(enforceLowSegmentMargin(compactSegments(segments)));
+  return compactSegments(segments);
 }
 
-std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
-                                                          const SE2State& start,
-                                                          const SE2State& goal) {
+std::vector<MotionSegment> SE2SequenceGenerator::generateCore(
+    const TopoPath& path,
+    const SE2State& start,
+    const SE2State& goal) {
   if (path.waypoints.size() < 2) return {};
 
   auto states = discretizePath(path, start, goal);
   if (states.size() < 2) return {};
 
-  return finalizeSegments(generateCoreSegments(states));
+  return generateCoreSegments(states);
+}
+
+std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
+                                                          const SE2State& start,
+                                                          const SE2State& goal) {
+  return finalizeSegments(generateCore(path, start, goal));
 }
 
 }  // namespace esv_planner

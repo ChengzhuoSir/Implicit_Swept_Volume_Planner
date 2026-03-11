@@ -26,6 +26,12 @@ public:
                                        const SE2State& start,
                                        const SE2State& goal);
 
+  // Exposed for focused regressions while removing legacy post-processing
+  // from the main paper-first path.
+  std::vector<MotionSegment> generateCore(const TopoPath& path,
+                                          const SE2State& start,
+                                          const SE2State& goal);
+
 private:
   const GridMap* map_ = nullptr;
   const CollisionChecker* checker_ = nullptr;
