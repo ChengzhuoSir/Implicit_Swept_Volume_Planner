@@ -103,18 +103,27 @@ Eigen::Vector2d rotateIntoWorld(const Eigen::Vector2d& body_vec, double yaw) {
 }
 
 std::vector<Eigen::Vector2d> collectLocalObstacleSamples(
-    const std::vector<Eigen::Vector2d>& obstacle_points,
+    const GeometryMap& geometry_map,
     const Eigen::Vector2d& center,
     double radius) {
+  const auto local_segments = geometry_map.queryLocalSegments(center, radius, 32);
   std::vector<std::pair<double, Eigen::Vector2d>> ranked;
   const double r2 = radius * radius;
-  ranked.reserve(obstacle_points.size());
-  for (const auto& world : obstacle_points) {
+  ranked.reserve(local_segments.size() * 3);
+
+  auto pushCandidate = [&](const Eigen::Vector2d& world) {
     const double dist2 = (world - center).squaredNorm();
     if (dist2 <= r2) {
       ranked.emplace_back(dist2, world);
     }
+  };
+
+  for (const auto& segment : local_segments) {
+    pushCandidate(geometry_map_detail::projectToSegment(center, segment));
+    pushCandidate(segment.a);
+    pushCandidate(segment.b);
   }
+
   std::sort(ranked.begin(), ranked.end(),
             [](const std::pair<double, Eigen::Vector2d>& lhs,
                const std::pair<double, Eigen::Vector2d>& rhs) {
@@ -123,8 +132,18 @@ std::vector<Eigen::Vector2d> collectLocalObstacleSamples(
   const size_t max_points = 96;
   std::vector<Eigen::Vector2d> samples;
   samples.reserve(std::min(max_points, ranked.size()));
+  const double dedup_tol2 = 1e-8;
   for (size_t i = 0; i < ranked.size() && i < max_points; ++i) {
-    samples.push_back(ranked[i].second);
+    bool duplicate = false;
+    for (const auto& existing : samples) {
+      if ((existing - ranked[i].second).squaredNorm() <= dedup_tol2) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
+      samples.push_back(ranked[i].second);
+    }
   }
   return samples;
 }
@@ -161,13 +180,6 @@ void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker,
   max_paths_ = max_paths;
   inscribed_radius_ = inscribed_radius;
   evaluator_.init(map, checker.footprint());
-
-  obstacle_points_.clear();
-  const auto& boundary_points = map.geometryMap().boundaryCellCenters();
-  obstacle_points_.reserve(boundary_points.size());
-  obstacle_points_.insert(obstacle_points_.end(),
-                          boundary_points.begin(),
-                          boundary_points.end());
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +595,8 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
   };
 
   for (int attempt = 0; attempt < 24; ++attempt) {
-    const auto obstacles = collectLocalObstacleSamples(obstacle_points_, wp.pos, obstacle_radius);
+    const auto obstacles =
+        collectLocalObstacleSamples(map_->geometryMap(), wp.pos, obstacle_radius);
     if (obstacles.empty()) {
       return continuousFree(wp);
     }
@@ -666,7 +679,7 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
       candidate.has_yaw = true;
 
       const auto candidate_obstacles =
-          collectLocalObstacleSamples(obstacle_points_, candidate.pos, obstacle_radius);
+          collectLocalObstacleSamples(map_->geometryMap(), candidate.pos, obstacle_radius);
       const double candidate_worst =
           evaluateWorstDistance(candidate, candidate_obstacles);
 

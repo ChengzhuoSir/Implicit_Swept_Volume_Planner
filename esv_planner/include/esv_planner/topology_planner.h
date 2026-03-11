@@ -48,7 +48,6 @@ private:
   // PRM graph
   std::vector<Eigen::Vector2d> nodes_;
   std::vector<std::vector<std::pair<int, double>>> adjacency_;  // (neighbor, weight)
-  std::vector<Eigen::Vector2d> obstacle_points_;
 
   // Helpers
   bool lineCollisionFree(const Eigen::Vector2d& a, const Eigen::Vector2d& b) const;
