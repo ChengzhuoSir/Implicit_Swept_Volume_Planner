@@ -542,6 +542,35 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
     return true;
   }
 
+  struct ObstacleInfo {
+    Eigen::Vector2d world = Eigen::Vector2d::Zero();
+    BodyFrameQuery query;
+    double effective_dist = kInf;
+  };
+
+  auto queryObstacleInfos = [&](const TopoWaypoint& candidate,
+                                const std::vector<Eigen::Vector2d>& candidate_obstacles) {
+    std::vector<ObstacleInfo> infos;
+    infos.reserve(candidate_obstacles.size());
+    if (candidate_obstacles.empty()) {
+      return infos;
+    }
+
+    Eigen::MatrixXd body_points(static_cast<Eigen::Index>(candidate_obstacles.size()), 2);
+    for (size_t i = 0; i < candidate_obstacles.size(); ++i) {
+      body_points.row(static_cast<Eigen::Index>(i)) =
+          rotateIntoBody(candidate_obstacles[i] - candidate.pos, candidate.yaw).transpose();
+    }
+    const auto queries = footprint.bodyFrameSdfModel().queryBatch(body_points);
+    infos.resize(candidate_obstacles.size());
+    for (size_t i = 0; i < candidate_obstacles.size(); ++i) {
+      infos[i].world = candidate_obstacles[i];
+      infos[i].query = queries[i];
+      infos[i].effective_dist = queries[i].signed_distance - obstacle_extent;
+    }
+    return infos;
+  };
+
   auto tryRepairYaw = [&](TopoWaypoint& candidate,
                           const std::vector<Eigen::Vector2d>& candidate_obstacles) {
     (void)candidate_obstacles;
@@ -577,11 +606,9 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
   auto evaluateWorstDistance = [&](const TopoWaypoint& candidate,
                                    const std::vector<Eigen::Vector2d>& candidate_obstacles) {
     double candidate_worst = kInf;
-    for (const auto& obs_world : candidate_obstacles) {
-      const Eigen::Vector2d body_point =
-          rotateIntoBody(obs_world - candidate.pos, candidate.yaw);
-      candidate_worst = std::min(candidate_worst,
-                                 footprint.bodyFrameSdf(body_point) - obstacle_extent);
+    const auto infos = queryObstacleInfos(candidate, candidate_obstacles);
+    for (const auto& info : infos) {
+      candidate_worst = std::min(candidate_worst, info.effective_dist);
     }
     return candidate_worst;
   };
@@ -612,15 +639,13 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
     Eigen::Vector2d worst_grad_world = Eigen::Vector2d::Zero();
     Eigen::Vector2d nearest_obstacle_dir = Eigen::Vector2d::Zero();
     double nearest_obstacle_dist2 = kInf;
-    for (const auto& obs_world : candidate_obstacles) {
-      const Eigen::Vector2d body_point = rotateIntoBody(obs_world - candidate.pos, candidate.yaw);
-      const BodyFrameQuery query = footprint.bodyFrameSdfModel().query(body_point);
-      const double effective_dist = query.signed_distance - obstacle_extent;
-      if (effective_dist < worst_dist) {
-        worst_dist = effective_dist;
-        worst_grad_world = rotateIntoWorld(query.gradient, candidate.yaw);
+    const auto infos = queryObstacleInfos(candidate, candidate_obstacles);
+    for (const auto& info : infos) {
+      if (info.effective_dist < worst_dist) {
+        worst_dist = info.effective_dist;
+        worst_grad_world = rotateIntoWorld(info.query.gradient, candidate.yaw);
       }
-      const Eigen::Vector2d rel = obs_world - candidate.pos;
+      const Eigen::Vector2d rel = info.world - candidate.pos;
       const double dist2 = rel.squaredNorm();
       if (dist2 < nearest_obstacle_dist2 && dist2 > 1e-12) {
         nearest_obstacle_dist2 = dist2;
@@ -700,22 +725,14 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& wp,
       return continuousFree(wp);
     }
 
-    struct ObstacleInfo {
-      Eigen::Vector2d world;
-      BodyFrameQuery query;
-      double effective_dist = kInf;
-    };
-
     std::vector<ObstacleInfo> violating;
     violating.reserve(obstacles.size());
     double worst_dist = kInf;
-    for (const auto& obs_world : obstacles) {
-      const Eigen::Vector2d body_point = rotateIntoBody(obs_world - wp.pos, wp.yaw);
-      const BodyFrameQuery query = footprint.bodyFrameSdfModel().query(body_point);
-      const double effective_dist = query.signed_distance - obstacle_extent;
-      worst_dist = std::min(worst_dist, effective_dist);
-      if (effective_dist < safe_dist) {
-        violating.push_back({obs_world, query, effective_dist});
+    const auto infos = queryObstacleInfos(wp, obstacles);
+    for (const auto& info : infos) {
+      worst_dist = std::min(worst_dist, info.effective_dist);
+      if (info.effective_dist < safe_dist) {
+        violating.push_back(info);
       }
     }
 

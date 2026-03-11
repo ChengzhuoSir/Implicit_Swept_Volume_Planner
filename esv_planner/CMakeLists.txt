@@ -17,6 +17,11 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(Eigen3 REQUIRED)
 
+set(ESV_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party")
+set(ESV_EIGEN_OVERRIDE_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/eigen3")
+set(ESV_LIBIGL_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/libigl/include")
+set(ESV_LBFGSPP_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/LBFGSpp/include")
+
 catkin_package(
   INCLUDE_DIRS include
   CATKIN_DEPENDS roscpp geometry_msgs nav_msgs visualization_msgs std_msgs tf2 tf2_ros
@@ -25,12 +30,16 @@ catkin_package(
 
 include_directories(
   include
+  ${ESV_EIGEN_OVERRIDE_INCLUDE_DIR}
   ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
+  ${ESV_LIBIGL_INCLUDE_DIR}
+  ${ESV_LBFGSPP_INCLUDE_DIR}
 )
 
 set(ESV_MAP_SOURCES
   src/grid_map.cpp
+  src/body_frame_sdf.cpp
   src/footprint_model.cpp
   src/collision_checker.cpp
 )
@@ -230,8 +239,18 @@ target_link_libraries(test_geometry_map
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_third_party_dependency_probe
+  test/test_third_party_dependency_probe.cpp
+)
+
+target_link_libraries(test_third_party_dependency_probe
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_body_frame_sdf
   test/test_body_frame_sdf.cpp
+  src/body_frame_sdf.cpp
   src/footprint_model.cpp
 )
 

@@ -82,6 +82,29 @@ int main(int argc, char** argv) {
     }
   }
 
+  {
+    Eigen::Matrix<double, 3, 2> samples;
+    samples << 0.10, 0.25,
+               -0.40, 0.20,
+               -0.20, 0.20;
+    const auto queries = sdf.queryBatch(samples);
+    if (queries.size() != 3) {
+      std::cerr << "[test] FAIL: expected batch query to return one result per sample\n";
+      return 1;
+    }
+    for (int i = 0; i < samples.rows(); ++i) {
+      const Eigen::Vector2d p = samples.row(i).transpose();
+      const auto scalar = sdf.query(p);
+      const auto& batch = queries[static_cast<size_t>(i)];
+      if (std::abs(scalar.signed_distance - batch.signed_distance) > 1e-6 ||
+          !approxVec(scalar.closest_point, batch.closest_point, 1e-6) ||
+          !approxVec(scalar.gradient, batch.gradient, 1e-6)) {
+        std::cerr << "[test] FAIL: batch query must match scalar query at row " << i << "\n";
+        return 1;
+      }
+    }
+  }
+
   std::cout << "[test] PASS\n";
   return 0;
 }

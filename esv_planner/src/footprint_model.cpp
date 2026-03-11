@@ -132,8 +132,7 @@ const std::vector<Eigen::Vector2d>& FootprintModel::denseBodySamples(
 
   for (double gx = bb_min_x + 0.5 * interior_spacing; gx <= bb_max_x; gx += interior_spacing) {
     for (double gy = bb_min_y + 0.5 * interior_spacing; gy <= bb_max_y; gy += interior_spacing) {
-      if (body_frame_sdf_detail::pointInsideByWinding(
-              Eigen::Vector2d(gx, gy), vertices_)) {
+      if (body_frame_sdf_.query(Eigen::Vector2d(gx, gy)).inside) {
         cache.samples.emplace_back(gx, gy);
       }
     }
