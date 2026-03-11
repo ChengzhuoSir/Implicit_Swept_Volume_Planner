@@ -29,17 +29,50 @@ include_directories(
   ${EIGEN3_INCLUDE_DIRS}
 )
 
-add_executable(esv_planner_node
-  src/esv_planner_node.cpp
+set(ESV_MAP_SOURCES
   src/grid_map.cpp
   src/footprint_model.cpp
   src/collision_checker.cpp
+)
+
+set(ESV_TOPOLOGY_SOURCES
+  ${ESV_MAP_SOURCES}
   src/topology_planner.cpp
+  src/continuous_svsdf_evaluator.cpp
+)
+
+set(ESV_SEQUENCE_SOURCES
+  ${ESV_TOPOLOGY_SOURCES}
   src/se2_sequence_generator.cpp
+  src/svsdf_evaluator.cpp
+)
+
+set(ESV_SEQUENCE_WITH_FEASIBILITY_SOURCES
+  ${ESV_SEQUENCE_SOURCES}
+  src/continuous_feasibility.cpp
+)
+
+set(ESV_OPTIMIZER_SOURCES
+  ${ESV_SEQUENCE_SOURCES}
+  src/trajectory_optimizer.cpp
+)
+
+set(ESV_HYBRID_ASTAR_SOURCES
+  ${ESV_MAP_SOURCES}
   src/hybrid_astar.cpp
+)
+
+set(ESV_SVSDF_SOURCES
+  src/grid_map.cpp
+  src/footprint_model.cpp
   src/svsdf_evaluator.cpp
   src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+)
+
+add_executable(esv_planner_node
+  src/esv_planner_node.cpp
+  ${ESV_OPTIMIZER_SOURCES}
+  src/hybrid_astar.cpp
 )
 
 target_link_libraries(esv_planner_node
@@ -48,15 +81,8 @@ target_link_libraries(esv_planner_node
 )
 
 add_executable(test_planner
-  src/test_planner.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_planner.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_planner
@@ -65,11 +91,8 @@ target_link_libraries(test_planner
 )
 
 add_executable(test_hybrid_astar_recovery
-  src/test_hybrid_astar_recovery.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/hybrid_astar.cpp
+  test/test_hybrid_astar_recovery.cpp
+  ${ESV_HYBRID_ASTAR_SOURCES}
 )
 
 target_link_libraries(test_hybrid_astar_recovery
@@ -78,11 +101,8 @@ target_link_libraries(test_hybrid_astar_recovery
 )
 
 add_executable(test_hybrid_astar_maze_cases
-  src/test_hybrid_astar_maze_cases.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/hybrid_astar.cpp
+  test/test_hybrid_astar_maze_cases.cpp
+  ${ESV_HYBRID_ASTAR_SOURCES}
 )
 
 target_link_libraries(test_hybrid_astar_maze_cases
@@ -91,12 +111,8 @@ target_link_libraries(test_hybrid_astar_maze_cases
 )
 
 add_executable(test_topology_shortcut
-  src/test_topology_shortcut.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_topology_shortcut.cpp
+  ${ESV_TOPOLOGY_SOURCES}
 )
 
 target_link_libraries(test_topology_shortcut
@@ -105,12 +121,8 @@ target_link_libraries(test_topology_shortcut
 )
 
 add_executable(test_topology_body_push
-  src/test_topology_body_push.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_topology_body_push.cpp
+  ${ESV_TOPOLOGY_SOURCES}
 )
 
 target_link_libraries(test_topology_body_push
@@ -119,12 +131,8 @@ target_link_libraries(test_topology_body_push
 )
 
 add_executable(test_topology_fixed_case_clearance
-  src/test_topology_fixed_case_clearance.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_topology_fixed_case_clearance.cpp
+  ${ESV_TOPOLOGY_SOURCES}
 )
 
 target_link_libraries(test_topology_fixed_case_clearance
@@ -133,15 +141,8 @@ target_link_libraries(test_topology_fixed_case_clearance
 )
 
 add_executable(test_motion_sequence
-  src/test_motion_sequence.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/continuous_feasibility.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_motion_sequence.cpp
+  ${ESV_SEQUENCE_WITH_FEASIBILITY_SOURCES}
 )
 
 target_link_libraries(test_motion_sequence
@@ -150,15 +151,8 @@ target_link_libraries(test_motion_sequence
 )
 
 add_executable(test_low_high_semantics
-  src/test_low_high_semantics.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/continuous_feasibility.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_low_high_semantics.cpp
+  ${ESV_SEQUENCE_WITH_FEASIBILITY_SOURCES}
 )
 
 target_link_libraries(test_low_high_semantics
@@ -167,14 +161,8 @@ target_link_libraries(test_low_high_semantics
 )
 
 add_executable(test_se2_fixed_case_fragmentation
-  src/test_se2_fixed_case_fragmentation.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_se2_fixed_case_fragmentation.cpp
+  ${ESV_SEQUENCE_SOURCES}
 )
 
 target_link_libraries(test_se2_fixed_case_fragmentation
@@ -183,15 +171,8 @@ target_link_libraries(test_se2_fixed_case_fragmentation
 )
 
 add_executable(test_esv_pipeline_maze
-  src/test_esv_pipeline_maze.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_esv_pipeline_maze.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_esv_pipeline_maze
@@ -200,15 +181,8 @@ target_link_libraries(test_esv_pipeline_maze
 )
 
 add_executable(test_esv_fixed_case_regression
-  src/test_esv_fixed_case_regression.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_esv_fixed_case_regression.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_esv_fixed_case_regression
@@ -217,15 +191,8 @@ target_link_libraries(test_esv_fixed_case_regression
 )
 
 add_executable(test_svsdf_phase_consistency
-  src/test_svsdf_phase_consistency.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_svsdf_phase_consistency.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_svsdf_phase_consistency
@@ -234,7 +201,7 @@ target_link_libraries(test_svsdf_phase_consistency
 )
 
 add_executable(test_grid_map_esdf
-  src/test_grid_map_esdf.cpp
+  test/test_grid_map_esdf.cpp
   src/grid_map.cpp
 )
 
@@ -244,7 +211,7 @@ target_link_libraries(test_grid_map_esdf
 )
 
 add_executable(test_geometry_map
-  src/test_geometry_map.cpp
+  test/test_geometry_map.cpp
   src/grid_map.cpp
 )
 
@@ -254,7 +221,7 @@ target_link_libraries(test_geometry_map
 )
 
 add_executable(test_body_frame_sdf
-  src/test_body_frame_sdf.cpp
+  test/test_body_frame_sdf.cpp
   src/footprint_model.cpp
 )
 
@@ -264,11 +231,8 @@ target_link_libraries(test_body_frame_sdf
 )
 
 add_executable(test_optimizer_r2_paper_semantics
-  src/test_optimizer_r2_paper_semantics.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_optimizer_r2_paper_semantics.cpp
+  ${ESV_SVSDF_SOURCES}
   src/trajectory_optimizer.cpp
 )
 
@@ -278,25 +242,9 @@ target_link_libraries(test_optimizer_r2_paper_semantics
 )
 
 add_executable(test_optimizer_se2_time_refinement
-  src/test_optimizer_se2_time_refinement.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_optimizer_se2_time_refinement.cpp
+  ${ESV_SVSDF_SOURCES}
   src/trajectory_optimizer.cpp
-)
-
-add_executable(test_continuous_svsdf_evaluator
-  src/test_continuous_svsdf_evaluator.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-)
-
-target_link_libraries(test_continuous_svsdf_evaluator
-  ${catkin_LIBRARIES}
-  ${EIGEN3_LIBRARIES}
 )
 
 target_link_libraries(test_optimizer_se2_time_refinement
@@ -304,12 +252,19 @@ target_link_libraries(test_optimizer_se2_time_refinement
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_continuous_svsdf_evaluator
+  test/test_continuous_svsdf_evaluator.cpp
+  ${ESV_SVSDF_SOURCES}
+)
+
+target_link_libraries(test_continuous_svsdf_evaluator
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_optimizer_select_best_clearance
-  src/test_optimizer_select_best_clearance.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
+  test/test_optimizer_select_best_clearance.cpp
+  ${ESV_SVSDF_SOURCES}
   src/trajectory_optimizer.cpp
 )
 
@@ -319,15 +274,8 @@ target_link_libraries(test_optimizer_select_best_clearance
 )
 
 add_executable(test_optimizer_se2_fixed_high_segments
-  src/test_optimizer_se2_fixed_high_segments.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_optimizer_se2_fixed_high_segments.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_optimizer_se2_fixed_high_segments
@@ -336,15 +284,8 @@ target_link_libraries(test_optimizer_se2_fixed_high_segments
 )
 
 add_executable(test_optimizer_se2_fixed_large_high_segment
-  src/test_optimizer_se2_fixed_large_high_segment.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_optimizer_se2_fixed_large_high_segment.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_optimizer_se2_fixed_large_high_segment
@@ -353,15 +294,8 @@ target_link_libraries(test_optimizer_se2_fixed_large_high_segment
 )
 
 add_executable(test_stitch_seam_connector
-  src/test_stitch_seam_connector.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_stitch_seam_connector.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_stitch_seam_connector
@@ -370,15 +304,8 @@ target_link_libraries(test_stitch_seam_connector
 )
 
 add_executable(test_optimizer_se2_maze_t_high_segment
-  src/test_optimizer_se2_maze_t_high_segment.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_optimizer_se2_maze_t_high_segment.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_optimizer_se2_maze_t_high_segment
@@ -387,15 +314,8 @@ target_link_libraries(test_optimizer_se2_maze_t_high_segment
 )
 
 add_executable(test_optimizer_se2_maze_l_path1_high_segment
-  src/test_optimizer_se2_maze_l_path1_high_segment.cpp
-  src/grid_map.cpp
-  src/footprint_model.cpp
-  src/collision_checker.cpp
-  src/topology_planner.cpp
-  src/se2_sequence_generator.cpp
-  src/svsdf_evaluator.cpp
-  src/continuous_svsdf_evaluator.cpp
-  src/trajectory_optimizer.cpp
+  test/test_optimizer_se2_maze_l_path1_high_segment.cpp
+  ${ESV_OPTIMIZER_SOURCES}
 )
 
 target_link_libraries(test_optimizer_se2_maze_l_path1_high_segment
@@ -404,7 +324,7 @@ target_link_libraries(test_optimizer_se2_maze_l_path1_high_segment
 )
 
 add_executable(test_planner_trigger_state
-  src/test_planner_trigger_state.cpp
+  test/test_planner_trigger_state.cpp
 )
 
 target_link_libraries(test_planner_trigger_state
@@ -413,7 +333,7 @@ target_link_libraries(test_planner_trigger_state
 )
 
 add_executable(test_trajectory_spatial_sampling
-  src/test_trajectory_spatial_sampling.cpp
+  test/test_trajectory_spatial_sampling.cpp
 )
 
 target_link_libraries(test_trajectory_spatial_sampling
