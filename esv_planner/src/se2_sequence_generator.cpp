@@ -70,12 +70,24 @@ SE2SequenceGenerator::SE2SequenceGenerator() {}
 
 void SE2SequenceGenerator::init(const GridMap& map, const CollisionChecker& checker,
                                  double discretization_step, int max_push_attempts) {
+  init(map, checker, discretization_step, max_push_attempts,
+       std::unique_ptr<ContinuousFeasibilityChecker>());
+}
+
+void SE2SequenceGenerator::init(
+    const GridMap& map, const CollisionChecker& checker,
+    double discretization_step, int max_push_attempts,
+    std::unique_ptr<ContinuousFeasibilityChecker> feasibility) {
   map_ = &map;
   checker_ = &checker;
   disc_step_ = discretization_step;
   max_push_ = max_push_attempts;
-  feasibility_.reset(
-      new GridContinuousFeasibilityChecker(map, checker, discretization_step));
+  if (feasibility) {
+    feasibility_ = std::move(feasibility);
+  } else {
+    feasibility_.reset(
+        new GridContinuousFeasibilityChecker(map, checker, discretization_step));
+  }
 }
 
 std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,

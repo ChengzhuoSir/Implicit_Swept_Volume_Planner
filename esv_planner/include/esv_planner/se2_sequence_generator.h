@@ -1,6 +1,7 @@
 #pragma once
 
 #include <esv_planner/common.h>
+#include <esv_planner/continuous_feasibility_checker.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/collision_checker.h>
 #include <esv_planner/continuous_feasibility.h>
@@ -15,6 +16,9 @@ public:
 
   void init(const GridMap& map, const CollisionChecker& checker,
             double discretization_step, int max_push_attempts);
+  void init(const GridMap& map, const CollisionChecker& checker,
+            double discretization_step, int max_push_attempts,
+            std::unique_ptr<ContinuousFeasibilityChecker> feasibility);
 
   // Generate SE(2) motion sequence for a given topological path (Algorithm 2)
   // Returns segments with risk levels marked

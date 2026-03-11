@@ -169,6 +169,16 @@ target_link_libraries(test_low_high_semantics
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_sequence_feasibility_injection
+  test/test_sequence_feasibility_injection.cpp
+  ${ESV_SEQUENCE_WITH_FEASIBILITY_SOURCES}
+)
+
+target_link_libraries(test_sequence_feasibility_injection
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_se2_fixed_case_fragmentation
   test/test_se2_fixed_case_fragmentation.cpp
   ${ESV_SEQUENCE_SOURCES}
