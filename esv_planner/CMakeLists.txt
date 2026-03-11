@@ -190,6 +190,16 @@ target_link_libraries(test_esv_fixed_case_regression
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_esv_second_case_regression
+  test/test_esv_second_case_regression.cpp
+  ${ESV_OPTIMIZER_SOURCES}
+)
+
+target_link_libraries(test_esv_second_case_regression
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_svsdf_phase_consistency
   test/test_svsdf_phase_consistency.cpp
   ${ESV_OPTIMIZER_SOURCES}
