@@ -825,15 +825,11 @@ std::vector<MotionSegment> SE2SequenceGenerator::enforceLowSegmentMargin(
   return compactSegments(refined);
 }
 
-std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
-                                                           const SE2State& start,
-                                                           const SE2State& goal) {
-  if (path.waypoints.size() < 2) return {};
-
-  auto states = discretizePath(path, start, goal);
-  if (states.size() < 2) return {};
-
+std::vector<MotionSegment> SE2SequenceGenerator::generateCoreSegments(
+    const std::vector<SE2State>& states) {
   std::vector<MotionSegment> segments;
+  if (states.size() < 2) return segments;
+
   MotionSegment current;
   current.risk = RiskLevel::LOW;
   current.waypoints.push_back(states.front());
@@ -1016,7 +1012,23 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     segments.push_back(current);
   }
 
+  return segments;
+}
+
+std::vector<MotionSegment> SE2SequenceGenerator::finalizeSegments(
+    const std::vector<MotionSegment>& segments) {
   return expandTightHighSegments(enforceLowSegmentMargin(compactSegments(segments)));
+}
+
+std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
+                                                          const SE2State& start,
+                                                          const SE2State& goal) {
+  if (path.waypoints.size() < 2) return {};
+
+  auto states = discretizePath(path, start, goal);
+  if (states.size() < 2) return {};
+
+  return finalizeSegments(generateCoreSegments(states));
 }
 
 }  // namespace esv_planner

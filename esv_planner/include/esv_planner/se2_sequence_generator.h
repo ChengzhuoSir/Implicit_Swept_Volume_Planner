@@ -116,6 +116,15 @@ private:
   std::vector<MotionSegment> enforceLowSegmentMargin(
       const std::vector<MotionSegment>& segments);
 
+  // Main paper-style segmentation pass before legacy post-processing.
+  std::vector<MotionSegment> generateCoreSegments(
+      const std::vector<SE2State>& states);
+
+  // Temporary compatibility wrapper while the legacy compaction pipeline is
+  // still being peeled away in later rebuild stages.
+  std::vector<MotionSegment> finalizeSegments(
+      const std::vector<MotionSegment>& segments);
+
   // Resample a straight sub-segment for recursive SegAdjust.
   std::vector<SE2State> buildLinearSegment(const SE2State& start,
                                            const SE2State& goal) const;
