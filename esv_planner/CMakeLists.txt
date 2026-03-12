@@ -285,6 +285,16 @@ target_link_libraries(test_geometry_map
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_minco_parameterization
+  test/test_minco_parameterization.cpp
+  src/minco_parameterization.cpp
+)
+
+target_link_libraries(test_minco_parameterization
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_third_party_dependency_probe
   test/test_third_party_dependency_probe.cpp
 )
