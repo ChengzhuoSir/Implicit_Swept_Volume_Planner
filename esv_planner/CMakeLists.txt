@@ -4,6 +4,9 @@ project(esv_planner)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+option(ESV_BUILD_LEGACY_EXPERIMENTAL_TESTS
+  "Build retired coefficient-space optimizer experiment tests"
+  OFF)
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
@@ -395,6 +398,28 @@ target_link_libraries(test_optimizer_se2_maze_t_high_segment
   ${EIGEN3_LIBRARIES}
 )
 
+if(ESV_BUILD_LEGACY_EXPERIMENTAL_TESTS)
+  add_executable(test_optimizer_se2_maze_t_path1_seg3
+    test/test_optimizer_se2_maze_t_path1_seg3.cpp
+    ${ESV_OPTIMIZER_SOURCES}
+  )
+
+  target_link_libraries(test_optimizer_se2_maze_t_path1_seg3
+    ${catkin_LIBRARIES}
+    ${EIGEN3_LIBRARIES}
+  )
+
+  add_executable(test_optimizer_se2_maze_t_path1_seg3_context
+    test/test_optimizer_se2_maze_t_path1_seg3_context.cpp
+    ${ESV_OPTIMIZER_SOURCES}
+  )
+
+  target_link_libraries(test_optimizer_se2_maze_t_path1_seg3_context
+    ${catkin_LIBRARIES}
+    ${EIGEN3_LIBRARIES}
+  )
+endif()
+
 add_executable(test_optimizer_se2_maze_l_path1_high_segment
   test/test_optimizer_se2_maze_l_path1_high_segment.cpp
   ${ESV_OPTIMIZER_SOURCES}
@@ -414,6 +439,18 @@ target_link_libraries(test_optimizer_se2_continuous_polynomial
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
 )
+
+if(ESV_BUILD_LEGACY_EXPERIMENTAL_TESTS)
+  add_executable(test_optimizer_se2_ct_variables
+    test/test_optimizer_se2_ct_variables.cpp
+    ${ESV_OPTIMIZER_SOURCES}
+  )
+
+  target_link_libraries(test_optimizer_se2_ct_variables
+    ${catkin_LIBRARIES}
+    ${EIGEN3_LIBRARIES}
+  )
+endif()
 
 add_executable(test_planner_trigger_state
   test/test_planner_trigger_state.cpp
