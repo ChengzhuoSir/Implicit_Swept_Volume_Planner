@@ -179,7 +179,7 @@ void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker,
   knn_ = knn;
   max_paths_ = max_paths;
   inscribed_radius_ = inscribed_radius;
-  evaluator_.init(map, checker.footprint());
+  evaluator_.initGridEsdf(map, checker.footprint());
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 #include <esv_planner/common.h>
 #include <esv_planner/continuous_collision_evaluator.h>
 #include <esv_planner/continuous_feasibility_checker.h>
-#include <esv_planner/continuous_svsdf_evaluator.h>
+#include <esv_planner/unified_continuous_evaluator.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/collision_checker.h>
 
@@ -18,7 +18,7 @@ public:
                                    const CollisionChecker& checker,
                                    double discretization_step)
       : map_(&map), checker_(&checker), disc_step_(discretization_step) {
-    evaluator_.init(map, checker.footprint());
+    evaluator_.initGridEsdf(map, checker.footprint());
   }
 
   GridContinuousFeasibilityChecker(
@@ -141,7 +141,7 @@ private:
   const GridMap* map_ = nullptr;
   const CollisionChecker* checker_ = nullptr;
   std::shared_ptr<const ContinuousCollisionEvaluator> external_evaluator_;
-  ContinuousSvsdfEvaluator evaluator_;
+  UnifiedContinuousEvaluator evaluator_;
   double required_clearance_ = 0.10;
   double disc_step_ = 0.15;
 };

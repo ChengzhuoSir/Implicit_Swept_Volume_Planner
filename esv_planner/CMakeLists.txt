@@ -49,6 +49,7 @@ set(ESV_MAP_SOURCES
 
 set(ESV_TOPOLOGY_SOURCES
   ${ESV_MAP_SOURCES}
+  src/unified_continuous_evaluator.cpp
   src/topology_planner.cpp
   src/continuous_svsdf_evaluator.cpp
 )
@@ -195,6 +196,7 @@ target_link_libraries(test_sequence_finalize_minimality
 add_executable(test_grid_continuous_feasibility_injection
   test/test_grid_continuous_feasibility_injection.cpp
   ${ESV_MAP_SOURCES}
+  src/unified_continuous_evaluator.cpp
   src/svsdf_evaluator.cpp
   src/continuous_svsdf_evaluator.cpp
   src/continuous_feasibility.cpp
@@ -359,8 +361,8 @@ target_link_libraries(test_continuous_svsdf_evaluator
 
 add_executable(test_unified_continuous_evaluator
   test/test_unified_continuous_evaluator.cpp
+  ${ESV_MAP_SOURCES}
   src/unified_continuous_evaluator.cpp
-  src/body_frame_sdf.cpp
   ${ESV_SVSDF_SOURCES}
 )
 

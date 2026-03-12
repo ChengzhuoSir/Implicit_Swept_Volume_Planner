@@ -1,7 +1,7 @@
 #pragma once
 
 #include <esv_planner/common.h>
-#include <esv_planner/continuous_svsdf_evaluator.h>
+#include <esv_planner/unified_continuous_evaluator.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/collision_checker.h>
 #include <vector>
@@ -43,7 +43,7 @@ private:
   int knn_ = 18;
   int max_paths_ = 14;
   double inscribed_radius_ = 0.1;
-  ContinuousSvsdfEvaluator evaluator_;
+  UnifiedContinuousEvaluator evaluator_;
 
   // PRM graph
   std::vector<Eigen::Vector2d> nodes_;
