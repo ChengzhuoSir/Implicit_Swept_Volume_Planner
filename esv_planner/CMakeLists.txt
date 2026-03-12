@@ -357,6 +357,18 @@ target_link_libraries(test_continuous_svsdf_evaluator
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_unified_continuous_evaluator
+  test/test_unified_continuous_evaluator.cpp
+  src/unified_continuous_evaluator.cpp
+  src/body_frame_sdf.cpp
+  ${ESV_SVSDF_SOURCES}
+)
+
+target_link_libraries(test_unified_continuous_evaluator
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_optimizer_select_best_clearance
   test/test_optimizer_select_best_clearance.cpp
   ${ESV_SVSDF_SOURCES}
