@@ -2,6 +2,10 @@
 
 #include <esv_planner/common.h>
 #include <Eigen/Dense>
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/box.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/index/rtree.hpp>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +14,8 @@
 #include <vector>
 
 namespace esv_planner {
+
+namespace bgi = boost::geometry::index;
 
 struct GeometrySegment {
   Eigen::Vector2d a = Eigen::Vector2d::Zero();
@@ -59,6 +65,7 @@ public:
     segments_.clear();
     boundary_points_.clear();
     boundary_cell_centers_.clear();
+    segment_rtree_.clear();
     width_ = width;
     height_ = height;
     resolution_ = resolution;
@@ -99,6 +106,14 @@ public:
       segments_.push_back(segment);
       boundary_points_.push_back(
           geometry_map_detail::segmentMidpoint(segment));
+      const size_t segment_index = segments_.size() - 1;
+      const double min_x = std::min(segment.a.x(), segment.b.x());
+      const double max_x = std::max(segment.a.x(), segment.b.x());
+      const double min_y = std::min(segment.a.y(), segment.b.y());
+      const double max_y = std::max(segment.a.y(), segment.b.y());
+      segment_rtree_.insert(
+          std::make_pair(BgBox(BgPoint(min_x, min_y), BgPoint(max_x, max_y)),
+                         segment_index));
     };
 
     for (int gy = 0; gy < height_; ++gy) {
@@ -170,7 +185,23 @@ public:
 
     double best_dist2 = std::numeric_limits<double>::infinity();
     Eigen::Vector2d best_point = Eigen::Vector2d::Zero();
-    for (const auto& segment : segments_) {
+    std::vector<RTreeValue> ranked;
+    segment_rtree_.query(
+        bgi::nearest(BgPoint(query.x(), query.y()), 16),
+        std::back_inserter(ranked));
+    if (ranked.empty()) {
+      ranked.reserve(segments_.size());
+      for (size_t i = 0; i < segments_.size(); ++i) {
+        const auto& segment = segments_[i];
+        const double min_x = std::min(segment.a.x(), segment.b.x());
+        const double max_x = std::max(segment.a.x(), segment.b.x());
+        const double min_y = std::min(segment.a.y(), segment.b.y());
+        const double max_y = std::max(segment.a.y(), segment.b.y());
+        ranked.emplace_back(BgBox(BgPoint(min_x, min_y), BgPoint(max_x, max_y)), i);
+      }
+    }
+    for (const auto& item : ranked) {
+      const auto& segment = segments_[item.second];
       const Eigen::Vector2d candidate =
           geometry_map_detail::projectToSegment(query, segment);
       const double dist2 = (candidate - query).squaredNorm();
@@ -189,8 +220,13 @@ public:
                                                   size_t max_segments) const {
     std::vector<std::pair<double, size_t>> ranked;
     const double radius2 = radius * radius;
-    ranked.reserve(segments_.size());
-    for (size_t i = 0; i < segments_.size(); ++i) {
+    std::vector<RTreeValue> candidates;
+    const BgBox query_box(BgPoint(query.x() - radius, query.y() - radius),
+                          BgPoint(query.x() + radius, query.y() + radius));
+    segment_rtree_.query(bgi::intersects(query_box), std::back_inserter(candidates));
+    ranked.reserve(candidates.size());
+    for (const auto& item : candidates) {
+      const size_t i = item.second;
       const double dist2 =
           geometry_map_detail::segmentDistanceSquared(query, segments_[i]);
       if (dist2 <= radius2) {
@@ -221,7 +257,29 @@ public:
     return result;
   }
 
+  std::vector<GeometrySegment> queryNearestSegments(const Eigen::Vector2d& query,
+                                                    size_t max_segments) const {
+    std::vector<GeometrySegment> result;
+    if (segments_.empty() || max_segments == 0) {
+      return result;
+    }
+
+    std::vector<RTreeValue> ranked;
+    segment_rtree_.query(
+        bgi::nearest(BgPoint(query.x(), query.y()), max_segments),
+        std::back_inserter(ranked));
+    result.reserve(ranked.size());
+    for (const auto& item : ranked) {
+      result.push_back(segments_[item.second]);
+    }
+    return result;
+  }
+
 private:
+  using BgPoint = boost::geometry::model::d2::point_xy<double>;
+  using BgBox = boost::geometry::model::box<BgPoint>;
+  using RTreeValue = std::pair<BgBox, size_t>;
+
   int width_ = 0;
   int height_ = 0;
   double resolution_ = 0.0;
@@ -230,6 +288,7 @@ private:
   std::vector<GeometrySegment> segments_;
   std::vector<Eigen::Vector2d> boundary_points_;
   std::vector<Eigen::Vector2d> boundary_cell_centers_;
+  bgi::rtree<RTreeValue, bgi::quadratic<16>> segment_rtree_;
 };
 
 }  // namespace esv_planner

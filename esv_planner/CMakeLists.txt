@@ -207,6 +207,20 @@ target_link_libraries(test_grid_continuous_feasibility_injection
   ${EIGEN3_LIBRARIES}
 )
 
+add_executable(test_grid_continuous_feasibility_default_backend
+  test/test_grid_continuous_feasibility_default_backend.cpp
+  ${ESV_MAP_SOURCES}
+  src/unified_continuous_evaluator.cpp
+  src/svsdf_evaluator.cpp
+  src/continuous_svsdf_evaluator.cpp
+  src/continuous_feasibility.cpp
+)
+
+target_link_libraries(test_grid_continuous_feasibility_default_backend
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
+)
+
 add_executable(test_sequence_feasibility_injection
   test/test_sequence_feasibility_injection.cpp
   ${ESV_SEQUENCE_WITH_FEASIBILITY_SOURCES}

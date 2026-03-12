@@ -18,7 +18,7 @@ public:
                                    const CollisionChecker& checker,
                                    double discretization_step)
       : map_(&map), checker_(&checker), disc_step_(discretization_step) {
-    evaluator_.initGridEsdf(map, checker.footprint());
+    evaluator_.initGeometryBodyFrame(map.geometryMap(), checker.footprint());
   }
 
   GridContinuousFeasibilityChecker(
@@ -135,6 +135,10 @@ public:
     }
 
     return false;
+  }
+
+  UnifiedContinuousEvaluator::BackendMode backendMode() const {
+    return evaluator_.mode();
   }
 
 private:

@@ -145,6 +145,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  const auto nearest_segments = geometry.queryNearestSegments(start, 8);
+  std::cout << "[test] nearest_segments=" << nearest_segments.size() << "\n";
+  if (nearest_segments.empty() || nearest_segments.size() > 8) {
+    std::cerr << "[test] FAIL: expected bounded nearest segment query\n";
+    return 1;
+  }
+
   std::cout << "[test] PASS\n";
   return 0;
 }
