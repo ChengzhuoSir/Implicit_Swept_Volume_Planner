@@ -1,5 +1,7 @@
 #pragma once
 
+#include <esv_planner/polygon_sdf.h>
+
 #include <Eigen/Core>
 #include <limits>
 #include <vector>
@@ -36,8 +38,6 @@ private:
   };
 
   std::vector<Eigen::Vector2d> vertices_;
-  Eigen::MatrixXd winding_vertices_;
-  Eigen::MatrixXi winding_edges_;
 
   NearestEdgeResult nearestEdge(const Eigen::Vector2d& point) const;
   Eigen::Vector2d outwardNormal(size_t edge_index) const;

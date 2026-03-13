@@ -1,10 +1,11 @@
 <launch>
   <!-- Optional map_server:
        set use_map_server:=true when ros-noetic-map-server is installed
-       and you want to load the bundled maze map -->
+       and you want to load the bundled office map -->
   <arg name="use_map_server" default="false" />
-  <arg name="map_file" default="$(find esv_planner)/maps/maze.yaml" />
+  <arg name="map_file" default="$(find esv_planner)/maps/map_clean_nav.yaml" />
   <arg name="strict_rebuild_case" default="" />
+  <arg name="use_start_goal_params" default="false" />
   <node if="$(arg use_map_server)"
         name="map_server"
         pkg="map_server"
@@ -15,6 +16,7 @@
   <!-- ESV Planner -->
   <include file="$(find esv_planner)/launch/planner.launch">
     <arg name="strict_rebuild_case" value="$(arg strict_rebuild_case)" />
+    <arg name="use_start_goal_params" value="$(arg use_start_goal_params)" />
   </include>
 
   <!-- RViz -->

@@ -22,7 +22,10 @@ public:
   // Queries
   bool isInside(int gx, int gy) const;
   bool isOccupied(int gx, int gy) const;
+  bool isRawOccupied(int gx, int gy) const;
   double getEsdf(double wx, double wy) const;
+  double getEsdfCell(int gx, int gy) const;
+  int linearIndex(int gx, int gy) const { return gy * width_ + gx; }
 
   // Inflate occupancy grid by given radius (in meters)
   void inflateByRadius(double radius);

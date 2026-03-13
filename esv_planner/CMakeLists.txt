@@ -16,11 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
 )
 
 find_package(Eigen3 REQUIRED)
-
-set(ESV_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party")
-set(ESV_EIGEN_OVERRIDE_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/eigen3")
-set(ESV_LIBIGL_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/libigl/include")
-set(ESV_LBFGSPP_INCLUDE_DIR "${ESV_THIRD_PARTY_DIR}/LBFGSpp/include")
+find_package(OpenMP REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
@@ -30,58 +26,67 @@ catkin_package(
 
 include_directories(
   include
-  ${ESV_EIGEN_OVERRIDE_INCLUDE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
-  ${ESV_LIBIGL_INCLUDE_DIR}
-  ${ESV_LBFGSPP_INCLUDE_DIR}
 )
 
-# --- Source groups (simplified after evaluator flattening) ---
+add_library(esv_planner_lmbm SHARED IMPORTED)
+set_target_properties(esv_planner_lmbm PROPERTIES
+  IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/lib/lmbm.so
+)
 
-set(ESV_MAP_SOURCES
+set(ESV_PLANNER_SOURCES
   src/grid_map.cpp
+  src/polygon_sdf.cpp
   src/body_frame_sdf.cpp
   src/footprint_model.cpp
   src/collision_checker.cpp
-)
-
-set(ESV_SVSDF_SOURCES
-  ${ESV_MAP_SOURCES}
   src/svsdf_evaluator.cpp
-)
-
-set(ESV_TOPOLOGY_SOURCES
-  ${ESV_SVSDF_SOURCES}
-  src/topology_planner.cpp
-)
-
-set(ESV_SEQUENCE_SOURCES
-  ${ESV_TOPOLOGY_SOURCES}
-  src/se2_sequence_generator.cpp
-)
-
-set(ESV_OPTIMIZER_SOURCES
-  ${ESV_SEQUENCE_SOURCES}
   src/minco_parameterization.cpp
-  src/trajectory_optimizer.cpp
+  src/grid_obstacle_source.cpp
+  src/local_obstacle_cache.cpp
+  src/swept_astar.cpp
+  src/path_sparsifier.cpp
+  src/lmbm_solver.cpp
+  src/true_svsdf_penalty.cpp
+  src/paper_backend.cpp
+  src/paper_planner.cpp
+)
+
+add_library(esv_planner_core ${ESV_PLANNER_SOURCES})
+target_link_libraries(esv_planner_core
+  esv_planner_lmbm
+  OpenMP::OpenMP_CXX
+  ${catkin_LIBRARIES}
+  ${EIGEN3_LIBRARIES}
 )
 
 # --- Main node ---
 
 add_executable(esv_planner_node
   src/esv_planner_node.cpp
-  ${ESV_OPTIMIZER_SOURCES}
 )
-target_link_libraries(esv_planner_node ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES})
+target_link_libraries(esv_planner_node esv_planner_core ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES})
 
 catkin_install_python(
   PROGRAMS
+    test/paper_pipeline_smoke.py
     test/trajectory_generation_test.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 if(CATKIN_ENABLE_TESTING)
   find_package(rostest REQUIRED)
+  catkin_add_gtest(esv_planner_geometry_test test/planner_geometry_test.cpp)
+  if(TARGET esv_planner_geometry_test)
+    target_link_libraries(esv_planner_geometry_test
+      esv_planner_core
+      gtest_main
+      ${catkin_LIBRARIES}
+      ${EIGEN3_LIBRARIES}
+    )
+  endif()
   add_rostest(test/trajectory_generation.test)
+  add_rostest(test/paper_pipeline_smoke.test)
 endif()

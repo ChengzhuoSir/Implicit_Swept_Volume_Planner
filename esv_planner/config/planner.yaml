@@ -1,61 +1,39 @@
 # ESV Planner Parameters
 
-# Robot footprint (T-shape, flat list of x,y pairs)
-footprint: [0.25, 0.3, 0.25, -0.3, -0.25, -0.3, -0.25, -0.1, -0.6, -0.1, -0.6, 0.1, -0.25, 0.1, -0.25, 0.3]
-inscribed_radius: 0.1
+# Robot footprint (T-shape, flat list of x,y pairs), overall envelope 0.5m x 0.5m
+footprint: [0.2, 0.25, 0.2, -0.25, -0.1, -0.25, -0.1, -0.09, -0.3, -0.09, -0.3, 0.09, -0.1, 0.09, -0.1, 0.25]
+inscribed_radius: 0.08
 
-# Topology planner
-topology:
-  num_samples: 800
-  knn: 20
-  max_paths: 14
-
-# SE(2) sequence generator
-se2:
-  discretization_step: 0.15
-  yaw_bins: 18
-  max_push_attempts: 5
-
-# Trajectory optimizer
-optimizer:
-  max_iterations: 100
-  lambda_smooth: 1.0
-  lambda_time: 1.0
-  lambda_safety: 10.0
-  lambda_dynamics: 1.0
-  lambda_pos_residual: 5.0
-  lambda_yaw_residual: 2.0
-  max_vel: 1.0
-  max_acc: 2.0
-  max_yaw_rate: 1.5
-  safety_margin: 0.1
-  step_size: 0.005
-
-hybrid_astar:
-  step_size: 0.35
-  wheel_base: 0.8
-  max_steer: 0.6
-  steer_samples: 5
-  goal_tolerance_pos: 0.35
-  goal_tolerance_yaw: 0.4
-  reverse_penalty: 2.0
-  steer_penalty: 0.2
-  steer_change_penalty: 0.2
-  switch_penalty: 2.0
-  max_expansions: 50000
-  fast_pass_max_expansions: 8000
-  fast_pass_steer_samples: 3
-  pose_recovery_max_radius: 0.6
-  pose_recovery_radial_step: 0.05
-  pose_recovery_angular_samples: 24
+paper:
+  front_end_clearance: 0.31
+  line_of_sight_clearance: 0.16
+  local_aabb_half_extent: 0.85
+  max_segment_length: 1.1
+  max_support_points: 24
+  backend:
+    max_iterations: 40
+    nominal_speed: 0.9
+    min_piece_duration: 0.35
+    anchor_weight: 4.0
+    smooth_weight: 4.0
+    obstacle_weight: 50.0
+    safety_margin: 0.03
+    obstacle_cutoff_distance: 1.0
+    sample_time_step: 0.04
+    lmbm_max_iterations: 45
+    lmbm_max_evaluations: 250
+    lmbm_timeout: 30.0
+    lmbm_bundle_size: 2
+    lmbm_ini_corrections: 7
+    lmbm_max_corrections: 15
 
 # Default start/goal
 start_pose:
-  x: 1.0
-  y: 8.5
-  yaw: 0.0
+  x: 0.91
+  y: 5.47
+  yaw: 0.32
 
 goal_pose:
-  x: 8.5
-  y: 1.0
-  yaw: -1.57
+  x: 9.09
+  y: 3.58
+  yaw: 1.61

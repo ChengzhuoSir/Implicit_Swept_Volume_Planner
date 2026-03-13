@@ -1,0 +1,6 @@
+image: map_clean_nav.pgm
+resolution: 0.05
+origin: [-62.550000000000004, -87.55000000000001, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

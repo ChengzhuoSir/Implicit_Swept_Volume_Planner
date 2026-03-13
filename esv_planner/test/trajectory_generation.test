@@ -1,5 +1,5 @@
 <launch>
-  <arg name="map_file" default="$(find esv_planner)/maps/maze.yaml" />
+  <arg name="map_file" default="$(find esv_planner)/maps/office.yaml" />
 
   <node name="map_server"
         pkg="map_server"

@@ -110,10 +110,20 @@ bool GridMap::isOccupied(int gx, int gy) const {
   return isOccupiedValue(val);
 }
 
+bool GridMap::isRawOccupied(int gx, int gy) const {
+  if (!isInside(gx, gy)) return true;
+  return isOccupiedValue(occupancy_[gy * width_ + gx]);
+}
+
 double GridMap::getEsdf(double wx, double wy) const {
   GridIndex gi = worldToGrid(wx, wy);
   if (!isInside(gi.x, gi.y)) return -1.0;
   return esdf_[gi.y * width_ + gi.x];
+}
+
+double GridMap::getEsdfCell(int gx, int gy) const {
+  if (!isInside(gx, gy)) return -1.0;
+  return esdf_[linearIndex(gx, gy)];
 }
 
 void GridMap::inflateByRadius(double radius) {

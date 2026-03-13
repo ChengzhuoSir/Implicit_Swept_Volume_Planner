@@ -48,6 +48,31 @@ struct MotionSegment {
   RiskLevel risk = RiskLevel::LOW;
 };
 
+struct PlanningStats {
+  double total_solve_time = 0.0;
+  double search_time = 0.0;
+  double optimization_time = 0.0;
+  double min_clearance = -std::numeric_limits<double>::infinity();
+  int coarse_path_points = 0;
+  int support_points = 0;
+  int local_obstacle_points = 0;
+  int optimizer_iterations = 0;
+
+  std::vector<double> asVector() const {
+    std::vector<double> values;
+    values.reserve(8);
+    values.push_back(total_solve_time);
+    values.push_back(search_time);
+    values.push_back(optimization_time);
+    values.push_back(min_clearance);
+    values.push_back(static_cast<double>(coarse_path_points));
+    values.push_back(static_cast<double>(support_points));
+    values.push_back(static_cast<double>(local_obstacle_points));
+    values.push_back(static_cast<double>(optimizer_iterations));
+    return values;
+  }
+};
+
 // MINCO polynomial piece: 5th-order, C² continuous
 // Coefficients for one piece: c0 + c1*t + c2*t^2 + c3*t^3 + c4*t^4 + c5*t^5
 struct PolyPiece {

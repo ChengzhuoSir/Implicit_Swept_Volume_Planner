@@ -1,9 +1,6 @@
 #include "esv_planner/body_frame_sdf.h"
 
-#include <igl/winding_number.h>
-
 #include <algorithm>
-#include <cmath>
 
 namespace esv_planner {
 
@@ -26,13 +23,6 @@ Eigen::Vector2d projectToSegment(const Eigen::Vector2d& point,
 
 void BodyFrameSdf::setPolygon(const std::vector<Eigen::Vector2d>& vertices) {
   vertices_ = vertices;
-  winding_vertices_.resize(static_cast<Eigen::Index>(vertices_.size()), 2);
-  winding_edges_.resize(static_cast<Eigen::Index>(vertices_.size()), 2);
-  for (Eigen::Index i = 0; i < static_cast<Eigen::Index>(vertices_.size()); ++i) {
-    winding_vertices_.row(i) = vertices_[static_cast<size_t>(i)].transpose();
-    winding_edges_(i, 0) = static_cast<int>(i);
-    winding_edges_(i, 1) = static_cast<int>((i + 1) % static_cast<Eigen::Index>(vertices_.size()));
-  }
 }
 
 double BodyFrameSdf::signedDistance(const Eigen::Vector2d& point) const {
@@ -74,26 +64,16 @@ std::vector<BodyFrameQuery> BodyFrameSdf::queryBatch(
   result.resize(static_cast<size_t>(points.rows()));
   if (vertices_.size() < 3 || points.cols() != 2) return result;
 
-  Eigen::VectorXd winding(points.rows());
-  igl::winding_number(winding_vertices_, winding_edges_, points, winding);
-
   for (Eigen::Index i = 0; i < points.rows(); ++i) {
-    BodyFrameQuery q;
-    q.winding_number = winding(i);
-    q.inside = std::abs(q.winding_number) > 0.5;
-
     const Eigen::Vector2d point = points.row(i).transpose();
-    const NearestEdgeResult nearest = nearestEdge(point);
-    q.closest_point = nearest.closest_point;
-    q.signed_distance = q.inside ? -nearest.distance : nearest.distance;
+    const PolygonSdfQuery polygon_query = queryPolygonSignedDistance(vertices_, point);
 
-    if (nearest.distance > 1e-9) {
-      q.gradient = (point - nearest.closest_point) / nearest.distance;
-      if (q.inside) q.gradient = -q.gradient;
-    } else {
-      q.gradient = outwardNormal(nearest.edge_index);
-    }
-
+    BodyFrameQuery q;
+    q.signed_distance = polygon_query.signed_distance;
+    q.closest_point = polygon_query.closest_point;
+    q.gradient = polygon_query.gradient;
+    q.inside = polygon_query.inside;
+    q.winding_number = polygon_query.inside ? 1.0 : 0.0;
     result[static_cast<size_t>(i)] = q;
   }
 

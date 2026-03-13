@@ -1,124 +1,157 @@
 #include <ros/ros.h>
+
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Path.h>
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <visualization_msgs/MarkerArray.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/Float64MultiArray.h>
 #include <tf2/utils.h>
+#include <visualization_msgs/MarkerArray.h>
+
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
 #include "esv_planner/common.h"
-#include "esv_planner/grid_map.h"
 #include "esv_planner/footprint_model.h"
-#include "esv_planner/collision_checker.h"
-#include "esv_planner/topology_planner.h"
-#include "esv_planner/se2_sequence_generator.h"
+#include "esv_planner/grid_map.h"
+#include "esv_planner/paper_planner.h"
 #include "esv_planner/svsdf_evaluator.h"
 #include "esv_planner/trajectory_sampling.h"
-#include "esv_planner/trajectory_optimizer.h"
 
 namespace esv_planner {
 
 class EsvPlannerNode {
 public:
-  EsvPlannerNode(ros::NodeHandle& nh, ros::NodeHandle& pnh) : nh_(nh), pnh_(pnh) {
+  EsvPlannerNode(ros::NodeHandle& nh, ros::NodeHandle& pnh)
+      : nh_(nh), pnh_(pnh) {
     loadParams();
     setupPubSub();
     ROS_INFO("ESV Planner node initialized.");
   }
 
 private:
-  ros::NodeHandle nh_, pnh_;
+  ros::NodeHandle nh_;
+  ros::NodeHandle pnh_;
 
-  // Subscribers
   ros::Subscriber map_sub_;
   ros::Subscriber start_sub_;
   ros::Subscriber goal_sub_;
 
-  // Publishers
   ros::Publisher traj_pub_;
   ros::Publisher marker_pub_;
   ros::Publisher time_pub_;
+  ros::Publisher stats_pub_;
 
-  // Components
   GridMap grid_map_;
   FootprintModel footprint_;
-  CollisionChecker collision_checker_;
-  TopologyPlanner topology_planner_;
-  SE2SequenceGenerator se2_generator_;
   SvsdfEvaluator svsdf_evaluator_;
-  TrajectoryOptimizer optimizer_;
-  OptimizerParams opt_params_;
+  PaperPlanner planner_;
+  PaperPlannerParams planner_params_;
 
-  // State
   SE2State start_;
   SE2State goal_;
   bool map_ready_ = false;
   bool start_ready_ = false;
   bool goal_ready_ = false;
-  std::vector<MotionSegment> last_segments_;
-
-  // Parameters
-  int num_samples_, knn_, max_paths_;
-  double disc_step_;
-  int yaw_bins_;
-  int max_push_;
+  bool use_start_goal_params_ = true;
 
   void loadParams() {
-    // Footprint
+    pnh_.param("use_start_goal_params", use_start_goal_params_, true);
+
     std::vector<double> fp_flat;
     pnh_.param("footprint", fp_flat, std::vector<double>());
     std::vector<Eigen::Vector2d> fp_verts;
     for (size_t i = 0; i + 1 < fp_flat.size(); i += 2) {
-      fp_verts.emplace_back(fp_flat[i], fp_flat[i + 1]);
+      fp_verts.push_back(Eigen::Vector2d(fp_flat[i], fp_flat[i + 1]));
     }
     if (fp_verts.empty()) {
-      fp_verts = {{0.25, 0.3}, {0.25, -0.3}, {-0.25, -0.3}, {-0.25, -0.1},
-                  {-0.6, -0.1}, {-0.6, 0.1}, {-0.25, 0.1}, {-0.25, 0.3}};
+      fp_verts.push_back(Eigen::Vector2d(0.25, 0.3));
+      fp_verts.push_back(Eigen::Vector2d(0.25, -0.3));
+      fp_verts.push_back(Eigen::Vector2d(-0.25, -0.3));
+      fp_verts.push_back(Eigen::Vector2d(-0.25, -0.1));
+      fp_verts.push_back(Eigen::Vector2d(-0.6, -0.1));
+      fp_verts.push_back(Eigen::Vector2d(-0.6, 0.1));
+      fp_verts.push_back(Eigen::Vector2d(-0.25, 0.1));
+      fp_verts.push_back(Eigen::Vector2d(-0.25, 0.3));
     }
     footprint_.setPolygon(fp_verts);
 
-    double insc_r;
-    pnh_.param("inscribed_radius", insc_r, 0.1);
-    footprint_.setInscribedRadius(insc_r);
+    double inscribed_radius = 0.1;
+    pnh_.param("inscribed_radius", inscribed_radius, 0.1);
+    footprint_.setInscribedRadius(inscribed_radius);
 
-    // Topology
-    pnh_.param("topology/num_samples", num_samples_, 520);
-    pnh_.param("topology/knn", knn_, 18);
-    pnh_.param("topology/max_paths", max_paths_, 14);
+    pnh_.param("paper/front_end_clearance",
+               planner_params_.front_end_clearance,
+               footprint_.circumscribedRadius() + 0.01);
+    pnh_.param("paper/line_of_sight_clearance",
+               planner_params_.line_of_sight_clearance,
+               footprint_.circumscribedRadius() * 0.35);
+    pnh_.param("paper/local_aabb_half_extent",
+               planner_params_.local_aabb_half_extent,
+               footprint_.circumscribedRadius() + 0.5);
+    pnh_.param("paper/max_segment_length",
+               planner_params_.max_segment_length, 1.1);
+    pnh_.param("paper/max_support_points",
+               planner_params_.max_support_points, 24);
+    pnh_.param("paper/backend/max_iterations",
+               planner_params_.backend.max_iterations, 40);
+    pnh_.param("paper/backend/nominal_speed",
+               planner_params_.backend.nominal_speed, 0.9);
+    pnh_.param("paper/backend/min_piece_duration",
+               planner_params_.backend.min_piece_duration, 0.35);
+    pnh_.param("paper/backend/anchor_weight",
+               planner_params_.backend.anchor_weight, 4.0);
+    pnh_.param("paper/backend/smooth_weight",
+               planner_params_.backend.smooth_weight, 4.0);
+    pnh_.param("paper/backend/obstacle_weight",
+               planner_params_.backend.obstacle_weight, 50.0);
+    pnh_.param("paper/backend/safety_margin",
+               planner_params_.backend.safety_margin, 0.03);
+    pnh_.param("paper/backend/obstacle_cutoff_distance",
+               planner_params_.backend.obstacle_cutoff_distance, 1.0);
+    pnh_.param("paper/backend/sample_time_step",
+               planner_params_.backend.sample_time_step, 0.04);
+    pnh_.param("paper/backend/lmbm_max_iterations",
+               planner_params_.backend.lmbm.max_iterations, 45);
+    pnh_.param("paper/backend/lmbm_max_evaluations",
+               planner_params_.backend.lmbm.max_evaluations, 250);
+    pnh_.param("paper/backend/lmbm_timeout",
+               planner_params_.backend.lmbm.timeout, 30.0f);
+    pnh_.param("paper/backend/lmbm_bundle_size",
+               planner_params_.backend.lmbm.bundle_size, 2);
+    pnh_.param("paper/backend/lmbm_ini_corrections",
+               planner_params_.backend.lmbm.ini_corrections, 7);
+    pnh_.param("paper/backend/lmbm_max_corrections",
+               planner_params_.backend.lmbm.max_corrections, 15);
 
-    // SE2
-    pnh_.param("se2/discretization_step", disc_step_, 0.15);
-    pnh_.param("se2/yaw_bins", yaw_bins_, 18);
-    pnh_.param("se2/max_push_attempts", max_push_, 5);
-
-    // Optimizer
-    pnh_.param("optimizer/max_iterations", opt_params_.max_iterations, 100);
-    pnh_.param("optimizer/lambda_smooth", opt_params_.lambda_smooth, 1.0);
-    pnh_.param("optimizer/lambda_time", opt_params_.lambda_time, 1.0);
-    pnh_.param("optimizer/lambda_safety", opt_params_.lambda_safety, 10.0);
-    pnh_.param("optimizer/lambda_dynamics", opt_params_.lambda_dynamics, 1.0);
-    pnh_.param("optimizer/max_vel", opt_params_.max_vel, 1.0);
-    pnh_.param("optimizer/max_acc", opt_params_.max_acc, 2.0);
-    pnh_.param("optimizer/max_yaw_rate", opt_params_.max_yaw_rate, 1.5);
-    pnh_.param("optimizer/lambda_pos_residual", opt_params_.lambda_pos_residual, 5.0);
-    pnh_.param("optimizer/lambda_yaw_residual", opt_params_.lambda_yaw_residual, 2.0);
-    pnh_.param("optimizer/safety_margin", opt_params_.safety_margin, 0.05);
-
-    // Default start/goal
-    double sx, sy, syaw, gx, gy, gyaw;
-    pnh_.param("start_pose/x", sx, 1.0);
-    pnh_.param("start_pose/y", sy, 1.0);
-    pnh_.param("start_pose/yaw", syaw, 0.0);
-    pnh_.param("goal_pose/x", gx, 8.0);
-    pnh_.param("goal_pose/y", gy, 8.0);
-    pnh_.param("goal_pose/yaw", gyaw, 1.57);
+    double sx = 1.0;
+    double sy = 1.0;
+    double syaw = 0.0;
+    double gx = 8.0;
+    double gy = 8.0;
+    double gyaw = 0.0;
+    pnh_.param("start_pose/x", sx, sx);
+    pnh_.param("start_pose/y", sy, sy);
+    pnh_.param("start_pose/yaw", syaw, syaw);
+    pnh_.param("goal_pose/x", gx, gx);
+    pnh_.param("goal_pose/y", gy, gy);
+    pnh_.param("goal_pose/yaw", gyaw, gyaw);
     start_ = SE2State(sx, sy, syaw);
     goal_ = SE2State(gx, gy, gyaw);
-    start_ready_ = true;
-    goal_ready_ = false;
+    start_ready_ = use_start_goal_params_;
+    goal_ready_ = use_start_goal_params_;
+
+    if (use_start_goal_params_) {
+      ROS_INFO("Configured startup start: (%.2f, %.2f, %.2f)",
+               start_.x, start_.y, start_.yaw);
+      ROS_INFO("Configured startup goal: (%.2f, %.2f, %.2f)",
+               goal_.x, goal_.y, goal_.yaw);
+    } else {
+      ROS_INFO("Startup start/goal parameters disabled; waiting for RViz /initialpose and /move_base_simple/goal.");
+    }
   }
 
   void setupPubSub() {
@@ -126,26 +159,25 @@ private:
     start_sub_ = nh_.subscribe("/initialpose", 1, &EsvPlannerNode::startCallback, this);
     goal_sub_ = nh_.subscribe("/move_base_simple/goal", 1, &EsvPlannerNode::goalCallback, this);
 
-    traj_pub_ = nh_.advertise<nav_msgs::Path>("/esv_planner/trajectory", 1);
-    marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/esv_planner/markers", 1);
-    time_pub_ = nh_.advertise<std_msgs::Float64>("/esv_planner/solve_time", 1);
+    traj_pub_ = nh_.advertise<nav_msgs::Path>("/esv_planner/trajectory", 1, true);
+    marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/esv_planner/markers", 1, true);
+    time_pub_ = nh_.advertise<std_msgs::Float64>("/esv_planner/solve_time", 1, true);
+    stats_pub_ = nh_.advertise<std_msgs::Float64MultiArray>(
+        "/esv_planner/planning_stats", 1, true);
   }
 
   void mapCallback(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
-    ROS_INFO("Received map: %dx%d, res=%.3f", msg->info.width, msg->info.height, msg->info.resolution);
+    ROS_INFO("Received map: %dx%d, res=%.3f",
+             msg->info.width, msg->info.height, msg->info.resolution);
     grid_map_.fromOccupancyGrid(msg);
-
-    collision_checker_.init(grid_map_, footprint_, yaw_bins_);
     svsdf_evaluator_.initGeometryBodyFrame(grid_map_.geometryMap(), footprint_);
-    topology_planner_.init(grid_map_, collision_checker_, svsdf_evaluator_,
-                           num_samples_, knn_, max_paths_, footprint_.inscribedRadius());
-    se2_generator_.init(grid_map_, collision_checker_, svsdf_evaluator_, disc_step_, max_push_);
-    optimizer_.init(grid_map_, svsdf_evaluator_, opt_params_);
-
+    planner_.init(grid_map_, footprint_, svsdf_evaluator_, planner_params_);
     map_ready_ = true;
-    ROS_INFO("Map processed. ESDF computed. Robot kernels generated.");
+    ROS_INFO("Map processed. Paper-aligned planner initialized.");
 
-    if (start_ready_ && goal_ready_) tryPlan();
+    if (start_ready_ && goal_ready_) {
+      tryPlan();
+    }
   }
 
   void startCallback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg) {
@@ -154,6 +186,9 @@ private:
     start_.yaw = tf2::getYaw(msg->pose.pose.orientation);
     start_ready_ = true;
     ROS_INFO("Start: (%.2f, %.2f, %.2f)", start_.x, start_.y, start_.yaw);
+    if (map_ready_ && goal_ready_) {
+      tryPlan();
+    }
   }
 
   void goalCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
@@ -162,238 +197,189 @@ private:
     goal_.yaw = tf2::getYaw(msg->pose.orientation);
     goal_ready_ = true;
     ROS_INFO("Goal: (%.2f, %.2f, %.2f)", goal_.x, goal_.y, goal_.yaw);
-
-    if (map_ready_ && start_ready_) tryPlan();
+    if (map_ready_ && start_ready_) {
+      tryPlan();
+    }
   }
 
   void tryPlan() {
-    ROS_INFO("=== ESV Planner: Starting planning ===");
-    ros::Time t0 = ros::Time::now();
+    ROS_INFO("=== ESV Planner: Starting paper-aligned planning ===");
+    const PaperPlannerResult result = planner_.plan(start_, goal_);
 
-    // Stage 1: Topology path generation
-    topology_planner_.buildRoadmap(start_.position(), goal_.position());
-    auto topo_paths = topology_planner_.searchPaths();
-    topology_planner_.shortenPaths(topo_paths);
-    ROS_INFO("Stage 1: Found %zu topological paths", topo_paths.size());
+    publishTrajectory(result.trajectory);
+    publishMarkers(result);
+    publishStats(result.stats);
 
-    if (topo_paths.empty()) {
-      ROS_WARN("No topological paths found!");
-      publishEmpty(topo_paths, t0);
-      return;
-    }
-
-    std::vector<Trajectory> candidates;
-    std::vector<std::vector<MotionSegment>> all_segments;
-
-    for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
-      // Stage 2: SE(2) motion sequence generation
-      auto segments = se2_generator_.generate(topo_paths[pi], start_, goal_);
-      if (segments.empty()) continue;
-
-      // Stage 3: Trajectory optimization
-      std::vector<Trajectory> seg_trajs(segments.size());
-      bool path_valid = true;
-
-      // First: optimize high-risk segments with SE(2) planner
-      for (size_t si = 0; si < segments.size(); ++si) {
-        if (segments[si].risk != RiskLevel::HIGH) continue;
-        double seg_len = waypointChainLength(segments[si].waypoints);
-        double est_time = std::max(0.5, seg_len / std::max(0.10, opt_params_.max_vel));
-        auto result = optimizer_.optimizeSE2(segments[si].waypoints, est_time);
-        if (!result.success || result.traj.empty()) { path_valid = false; break; }
-        seg_trajs[si] = result.traj;
-      }
-      if (!path_valid) continue;
-
-      // Then: optimize low-risk segments with R² planner
-      for (size_t si = 0; si < segments.size(); ++si) {
-        if (segments[si].risk == RiskLevel::HIGH) continue;
-        double seg_len = waypointChainLength(segments[si].waypoints);
-        double est_time = std::max(0.5, seg_len / std::max(0.10, opt_params_.max_vel));
-        auto result = optimizer_.optimizeR2(segments[si].waypoints, est_time);
-        if (!result.success || result.traj.empty()) { path_valid = false; break; }
-        seg_trajs[si] = result.traj;
-      }
-      if (!path_valid) continue;
-
-      Trajectory full = optimizer_.stitch(segments, seg_trajs);
-      if (full.empty()) continue;
-
-      double min_svsdf = svsdf_evaluator_.evaluateTrajectory(full);
-      if (min_svsdf >= 0.0) {
-        candidates.push_back(full);
-        all_segments.push_back(segments);
-        ROS_INFO("  Path %zu accepted: min_svsdf=%.3f", pi, min_svsdf);
-        if (min_svsdf >= opt_params_.safety_margin) break;  // early stop
-      }
-    }
-
-    if (candidates.empty()) {
-      ROS_WARN("No valid trajectories generated!");
-      publishEmpty(topo_paths, t0);
-      return;
-    }
-
-    Trajectory best = optimizer_.selectBest(candidates);
-    last_segments_ = all_segments.empty() ? std::vector<MotionSegment>() : all_segments[0];
-
-    ros::Time t1 = ros::Time::now();
-    double solve_time = (t1 - t0).toSec();
-    ROS_INFO("=== Planning done: %.3f s, %zu candidates ===", solve_time, candidates.size());
-
-    publishTrajectory(best);
-    publishMarkers(topo_paths, best, last_segments_);
     std_msgs::Float64 time_msg;
-    time_msg.data = solve_time;
+    time_msg.data = result.stats.total_solve_time;
     time_pub_.publish(time_msg);
-  }
 
-  void publishEmpty(const std::vector<TopoPath>& topo_paths, ros::Time t0) {
-    nav_msgs::Path empty_path;
-    empty_path.header.stamp = ros::Time::now();
-    empty_path.header.frame_id = "map";
-    traj_pub_.publish(empty_path);
-    publishMarkers(topo_paths, Trajectory(), {});
-    std_msgs::Float64 time_msg;
-    time_msg.data = (ros::Time::now() - t0).toSec();
-    time_pub_.publish(time_msg);
+    if (result.success) {
+      ROS_INFO("=== Planning done: %.3f s, coarse=%d support=%d local_obs=%d min_clearance=%.3f ===",
+               result.stats.total_solve_time,
+               result.stats.coarse_path_points,
+               result.stats.support_points,
+               result.stats.local_obstacle_points,
+               result.stats.min_clearance);
+    } else {
+      ROS_WARN("Planning failed after %.3f s (coarse=%d support=%d local_obs=%d min_clearance=%.3f)",
+               result.stats.total_solve_time,
+               result.stats.coarse_path_points,
+               result.stats.support_points,
+               result.stats.local_obstacle_points,
+               result.stats.min_clearance);
+    }
   }
 
   void publishTrajectory(const Trajectory& traj) {
-    if (traj.empty()) return;
     nav_msgs::Path path_msg;
     path_msg.header.stamp = ros::Time::now();
     path_msg.header.frame_id = "map";
-
-    const auto samples = sampleTrajectoryByArcLength(traj, 0.05, 0.02);
-    for (const auto& st : samples) {
-      geometry_msgs::PoseStamped ps;
-      ps.header = path_msg.header;
-      ps.pose.position.x = st.x;
-      ps.pose.position.y = st.y;
-      ps.pose.orientation.z = std::sin(st.yaw * 0.5);
-      ps.pose.orientation.w = std::cos(st.yaw * 0.5);
-      path_msg.poses.push_back(ps);
+    if (!traj.empty()) {
+      const std::vector<SE2State> samples = sampleTrajectoryByArcLength(traj, 0.05, 0.02);
+      for (size_t i = 0; i < samples.size(); ++i) {
+        geometry_msgs::PoseStamped pose;
+        pose.header = path_msg.header;
+        pose.pose.position.x = samples[i].x;
+        pose.pose.position.y = samples[i].y;
+        pose.pose.orientation.z = std::sin(samples[i].yaw * 0.5);
+        pose.pose.orientation.w = std::cos(samples[i].yaw * 0.5);
+        path_msg.poses.push_back(pose);
+      }
     }
     traj_pub_.publish(path_msg);
   }
 
-  visualization_msgs::Marker makeFootprintMarker(
-      int& id, const std::string& ns, double x, double y, double yaw,
-      float r, float g, float b, float a, double scale_x) {
-    visualization_msgs::Marker m;
-    m.header.frame_id = "map";
-    m.header.stamp = ros::Time::now();
-    m.ns = ns;
-    m.id = id++;
-    m.type = visualization_msgs::Marker::LINE_STRIP;
-    m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = scale_x;
-    m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = a;
-
-    auto verts = footprint_.rotatedVertices(yaw);
-    for (const auto& v : verts) {
-      geometry_msgs::Point p;
-      p.x = v.x() + x;
-      p.y = v.y() + y;
-      p.z = 0.15;
-      m.points.push_back(p);
-    }
-    if (!verts.empty()) {
-      geometry_msgs::Point p;
-      p.x = verts[0].x() + x;
-      p.y = verts[0].y() + y;
-      p.z = 0.15;
-      m.points.push_back(p);
-    }
-    return m;
+  void publishStats(const PlanningStats& stats) {
+    std_msgs::Float64MultiArray msg;
+    msg.data = stats.asVector();
+    stats_pub_.publish(msg);
   }
 
-  void publishMarkers(const std::vector<TopoPath>& topo_paths,
-                       const Trajectory& best,
-                       const std::vector<MotionSegment>& segments) {
-    visualization_msgs::MarkerArray ma;
+  visualization_msgs::Marker makeLineMarker(
+      int id,
+      const std::string& ns,
+      float r,
+      float g,
+      float b,
+      float a,
+      double width) const {
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = "map";
+    marker.header.stamp = ros::Time::now();
+    marker.ns = ns;
+    marker.id = id;
+    marker.type = visualization_msgs::Marker::LINE_STRIP;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.scale.x = width;
+    marker.color.r = r;
+    marker.color.g = g;
+    marker.color.b = b;
+    marker.color.a = a;
+    return marker;
+  }
+
+  visualization_msgs::Marker makeFootprintMarker(
+      int id,
+      const std::string& ns,
+      const SE2State& state,
+      float r,
+      float g,
+      float b) const {
+    visualization_msgs::Marker marker = makeLineMarker(id, ns, r, g, b, 0.9f, 0.03);
+    const std::vector<Eigen::Vector2d> verts = footprint_.rotatedVertices(state.yaw);
+    for (size_t i = 0; i < verts.size(); ++i) {
+      geometry_msgs::Point point;
+      point.x = verts[i].x() + state.x;
+      point.y = verts[i].y() + state.y;
+      point.z = 0.15;
+      marker.points.push_back(point);
+    }
+    if (!verts.empty()) {
+      geometry_msgs::Point point;
+      point.x = verts[0].x() + state.x;
+      point.y = verts[0].y() + state.y;
+      point.z = 0.15;
+      marker.points.push_back(point);
+    }
+    return marker;
+  }
+
+  void publishMarkers(const PaperPlannerResult& result) {
+    visualization_msgs::MarkerArray markers;
     int id = 0;
 
-    // Topological paths
-    for (size_t pi = 0; pi < topo_paths.size(); ++pi) {
-      visualization_msgs::Marker m;
-      m.header.frame_id = "map";
-      m.header.stamp = ros::Time::now();
-      m.ns = "topo_paths";
-      m.id = id++;
-      m.type = visualization_msgs::Marker::LINE_STRIP;
-      m.action = visualization_msgs::Marker::ADD;
-      m.scale.x = 0.03;
-      m.color.r = 0.5; m.color.g = 0.5; m.color.b = 1.0; m.color.a = 0.6;
-      for (const auto& wp : topo_paths[pi].waypoints) {
-        geometry_msgs::Point p;
-        p.x = wp.pos.x(); p.y = wp.pos.y(); p.z = 0.05;
-        m.points.push_back(p);
+    visualization_msgs::Marker coarse =
+        makeLineMarker(id++, "coarse_path", 0.3f, 0.5f, 1.0f, 0.8f, 0.03);
+    for (size_t i = 0; i < result.coarse_path.size(); ++i) {
+      geometry_msgs::Point point;
+      point.x = result.coarse_path[i].x();
+      point.y = result.coarse_path[i].y();
+      point.z = 0.05;
+      coarse.points.push_back(point);
+    }
+    markers.markers.push_back(coarse);
+
+    visualization_msgs::Marker support =
+        makeLineMarker(id++, "support_path", 1.0f, 0.6f, 0.0f, 0.9f, 0.05);
+    for (size_t i = 0; i < result.support_states.size(); ++i) {
+      geometry_msgs::Point point;
+      point.x = result.support_states[i].x;
+      point.y = result.support_states[i].y;
+      point.z = 0.08;
+      support.points.push_back(point);
+    }
+    markers.markers.push_back(support);
+
+    visualization_msgs::Marker local_obs;
+    local_obs.header.frame_id = "map";
+    local_obs.header.stamp = ros::Time::now();
+    local_obs.ns = "local_obstacles";
+    local_obs.id = id++;
+    local_obs.type = visualization_msgs::Marker::POINTS;
+    local_obs.action = visualization_msgs::Marker::ADD;
+    local_obs.scale.x = 0.04;
+    local_obs.scale.y = 0.04;
+    local_obs.color.r = 1.0f;
+    local_obs.color.g = 0.1f;
+    local_obs.color.b = 0.1f;
+    local_obs.color.a = 0.6f;
+    for (size_t i = 0; i < result.local_obstacles.size(); ++i) {
+      geometry_msgs::Point point;
+      point.x = result.local_obstacles[i].x();
+      point.y = result.local_obstacles[i].y();
+      local_obs.points.push_back(point);
+    }
+    markers.markers.push_back(local_obs);
+
+    if (!result.trajectory.empty()) {
+      visualization_msgs::Marker traj =
+          makeLineMarker(id++, "best_traj", 0.0f, 1.0f, 0.0f, 1.0f, 0.05);
+      const std::vector<SE2State> traj_samples =
+          sampleTrajectoryByArcLength(result.trajectory, 0.05, 0.02);
+      for (size_t i = 0; i < traj_samples.size(); ++i) {
+        geometry_msgs::Point point;
+        point.x = traj_samples[i].x;
+        point.y = traj_samples[i].y;
+        point.z = 0.1;
+        traj.points.push_back(point);
       }
-      ma.markers.push_back(m);
+      markers.markers.push_back(traj);
+
+      const std::vector<SE2State> fp_samples =
+          sampleTrajectoryByArcLength(result.trajectory, 0.45, 0.02);
+      for (size_t i = 0; i < fp_samples.size(); ++i) {
+        markers.markers.push_back(
+            makeFootprintMarker(id++, "footprint", fp_samples[i], 0.0f, 0.8f, 0.0f));
+      }
     }
 
-    // Best trajectory
-    if (!best.empty()) {
-      visualization_msgs::Marker m;
-      m.header.frame_id = "map";
-      m.header.stamp = ros::Time::now();
-      m.ns = "best_traj";
-      m.id = id++;
-      m.type = visualization_msgs::Marker::LINE_STRIP;
-      m.action = visualization_msgs::Marker::ADD;
-      m.scale.x = 0.05;
-      m.color.r = 0.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 1.0;
-      const auto samples = sampleTrajectoryByArcLength(best, 0.05, 0.02);
-      for (const auto& st : samples) {
-        geometry_msgs::Point p;
-        p.x = st.x; p.y = st.y; p.z = 0.1;
-        m.points.push_back(p);
-      }
-      ma.markers.push_back(m);
+    markers.markers.push_back(
+        makeFootprintMarker(id++, "start_goal", start_, 0.0f, 1.0f, 1.0f));
+    markers.markers.push_back(
+        makeFootprintMarker(id++, "start_goal", goal_, 1.0f, 0.0f, 1.0f));
 
-      // Footprint along trajectory
-      const auto fp_samples = sampleTrajectoryByArcLength(best, 0.45, 0.02);
-      for (const auto& st : fp_samples) {
-        ma.markers.push_back(
-            makeFootprintMarker(id, "footprint", st.x, st.y, st.yaw,
-                                0.0f, 0.8f, 0.0f, 0.5f, 0.02));
-      }
-    }
-
-    // SE(2) vs R² segment coloring
-    for (const auto& seg : segments) {
-      visualization_msgs::Marker m;
-      m.header.frame_id = "map";
-      m.header.stamp = ros::Time::now();
-      m.ns = "segments";
-      m.id = id++;
-      m.type = visualization_msgs::Marker::LINE_STRIP;
-      m.action = visualization_msgs::Marker::ADD;
-      m.scale.x = 0.04;
-      if (seg.risk == RiskLevel::HIGH) {
-        m.color.r = 1.0f; m.color.g = 0.2f; m.color.b = 0.2f; m.color.a = 0.8f;
-      } else {
-        m.color.r = 0.2f; m.color.g = 0.2f; m.color.b = 1.0f; m.color.a = 0.8f;
-      }
-      for (const auto& wp : seg.waypoints) {
-        geometry_msgs::Point p;
-        p.x = wp.x; p.y = wp.y; p.z = 0.12;
-        m.points.push_back(p);
-      }
-      ma.markers.push_back(m);
-    }
-
-    // Start and goal footprint
-    ma.markers.push_back(
-        makeFootprintMarker(id, "start_goal", start_.x, start_.y, start_.yaw,
-                            0.0f, 1.0f, 1.0f, 1.0f, 0.03));
-    ma.markers.push_back(
-        makeFootprintMarker(id, "start_goal", goal_.x, goal_.y, goal_.yaw,
-                            1.0f, 0.0f, 1.0f, 1.0f, 0.03));
-
-    marker_pub_.publish(ma);
+    marker_pub_.publish(markers);
   }
 };
 
@@ -403,7 +389,6 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "esv_planner_node");
   ros::NodeHandle nh;
   ros::NodeHandle pnh("~");
-
   esv_planner::EsvPlannerNode node(nh, pnh);
   ros::spin();
   return 0;
