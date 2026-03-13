@@ -1,0 +1,26 @@
+<launch>
+  <arg name="map_file" default="$(find esv_planner)/maps/maze.yaml" />
+
+  <node name="map_server"
+        pkg="map_server"
+        type="map_server"
+        args="$(arg map_file)"
+        required="true" />
+
+  <node name="esv_planner"
+        pkg="esv_planner"
+        type="esv_planner_node"
+        output="screen"
+        required="true">
+    <rosparam file="$(find esv_planner)/config/planner.yaml" command="load" />
+    <rosparam file="$(find esv_planner)/test/trajectory_generation_params.yaml" command="load" />
+  </node>
+
+  <test test-name="trajectory_generation"
+        pkg="esv_planner"
+        type="trajectory_generation_test.py"
+        time-limit="45">
+    <param name="timeout" value="20.0" />
+    <param name="trajectory_topic" value="/esv_planner/trajectory" />
+  </test>
+</launch>

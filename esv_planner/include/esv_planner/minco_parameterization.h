@@ -19,6 +19,11 @@ public:
       const std::vector<SE2State>& support_states,
       const std::vector<double>& durations);
 
+  // Low-dimensional MINCO variables with fixed piece durations:
+  // optimize only interior x/y/yaw, while start/goal and durations stay fixed.
+  static Eigen::VectorXd packSe2StateVariables(
+      const std::vector<SE2State>& support_states);
+
   static bool unpackSe2DecisionVariables(
       const MincoDecisionVariables& vars,
       const SE2State& start,
@@ -26,9 +31,22 @@ public:
       std::vector<SE2State>* support_states,
       std::vector<double>* durations);
 
+  static bool unpackSe2StateVariables(
+      const Eigen::VectorXd& vars,
+      int piece_count,
+      const SE2State& start,
+      const SE2State& goal,
+      std::vector<SE2State>* support_states);
+
   static Trajectory buildSe2Trajectory(const MincoDecisionVariables& vars,
                                        const SE2State& start,
                                        const SE2State& goal);
+
+  static Trajectory buildSe2TrajectoryFixedTime(
+      const Eigen::VectorXd& vars,
+      const std::vector<double>& durations,
+      const SE2State& start,
+      const SE2State& goal);
 
 private:
   static void fitPositionQuintic(const std::vector<Eigen::Vector2d>& positions,

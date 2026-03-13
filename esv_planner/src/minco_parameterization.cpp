@@ -6,22 +6,7 @@
 
 namespace esv_planner {
 
-namespace {
-
-std::vector<double> unwrapYawSequence(const std::vector<SE2State>& states) {
-  std::vector<double> yaws;
-  yaws.reserve(states.size());
-  if (states.empty()) return yaws;
-
-  yaws.push_back(states.front().yaw);
-  for (size_t i = 1; i < states.size(); ++i) {
-    const double delta = normalizeAngle(states[i].yaw - states[i - 1].yaw);
-    yaws.push_back(yaws.back() + delta);
-  }
-  return yaws;
-}
-
-}  // namespace
+// unwrapYawSequence is now in common.h
 
 MincoDecisionVariables MincoParameterization::packSe2DecisionVariables(
     const std::vector<SE2State>& support_states,
@@ -47,6 +32,23 @@ MincoDecisionVariables MincoParameterization::packSe2DecisionVariables(
   }
 
   return vars;
+}
+
+Eigen::VectorXd MincoParameterization::packSe2StateVariables(
+    const std::vector<SE2State>& support_states) {
+  if (support_states.size() < 2) {
+    return Eigen::VectorXd();
+  }
+
+  const int interior_count = static_cast<int>(support_states.size()) - 2;
+  Eigen::VectorXd values = Eigen::VectorXd::Zero(3 * interior_count);
+  int cursor = 0;
+  for (int i = 1; i + 1 < static_cast<int>(support_states.size()); ++i) {
+    values(cursor++) = support_states[i].x;
+    values(cursor++) = support_states[i].y;
+    values(cursor++) = support_states[i].yaw;
+  }
+  return values;
 }
 
 bool MincoParameterization::unpackSe2DecisionVariables(
@@ -89,6 +91,38 @@ bool MincoParameterization::unpackSe2DecisionVariables(
   return true;
 }
 
+bool MincoParameterization::unpackSe2StateVariables(
+    const Eigen::VectorXd& vars,
+    int piece_count,
+    const SE2State& start,
+    const SE2State& goal,
+    std::vector<SE2State>* support_states) {
+  if (!support_states || piece_count <= 0) {
+    return false;
+  }
+
+  const int expected_dim = 3 * std::max(0, piece_count - 1);
+  if (vars.size() != expected_dim) {
+    return false;
+  }
+
+  support_states->clear();
+  support_states->reserve(static_cast<size_t>(piece_count + 1));
+  support_states->push_back(start);
+
+  int cursor = 0;
+  for (int i = 0; i < piece_count - 1; ++i) {
+    SE2State state;
+    state.x = vars(cursor++);
+    state.y = vars(cursor++);
+    state.yaw = vars(cursor++);
+    state.normalizeYaw();
+    support_states->push_back(state);
+  }
+  support_states->push_back(goal);
+  return true;
+}
+
 Trajectory MincoParameterization::buildSe2Trajectory(
     const MincoDecisionVariables& vars,
     const SE2State& start,
@@ -96,6 +130,44 @@ Trajectory MincoParameterization::buildSe2Trajectory(
   std::vector<SE2State> support_states;
   std::vector<double> durations;
   if (!unpackSe2DecisionVariables(vars, start, goal, &support_states, &durations)) {
+    return {};
+  }
+
+  std::vector<Eigen::Vector2d> positions;
+  positions.reserve(support_states.size());
+  for (const auto& state : support_states) {
+    positions.push_back(state.position());
+  }
+
+  const std::vector<double> yaws = unwrapYawSequence(support_states);
+  const Eigen::Vector2d first_delta = positions[1] - positions[0];
+  const Eigen::Vector2d last_delta =
+      positions.back() - positions[positions.size() - 2];
+  const double first_dt = std::max(0.05, durations.front());
+  const double last_dt = std::max(0.05, durations.back());
+  const Eigen::Vector2d v0 = first_delta / first_dt;
+  const Eigen::Vector2d vf = last_delta / last_dt;
+  const Eigen::Vector2d a0 = Eigen::Vector2d::Zero();
+  const Eigen::Vector2d af = Eigen::Vector2d::Zero();
+  const double omega0 = normalizeAngle(yaws[1] - yaws[0]) / first_dt;
+  const double omegaf =
+      normalizeAngle(yaws.back() - yaws[yaws.size() - 2]) / last_dt;
+
+  Trajectory traj;
+  fitPositionQuintic(positions, durations, v0, vf, a0, af, &traj.pos_pieces);
+  fitYawQuintic(yaws, durations, omega0, omegaf, &traj.yaw_pieces);
+  return traj;
+}
+
+Trajectory MincoParameterization::buildSe2TrajectoryFixedTime(
+    const Eigen::VectorXd& vars,
+    const std::vector<double>& durations,
+    const SE2State& start,
+    const SE2State& goal) {
+  std::vector<SE2State> support_states;
+  if (durations.empty() ||
+      !unpackSe2StateVariables(vars, static_cast<int>(durations.size()),
+                               start, goal, &support_states)) {
     return {};
   }
 

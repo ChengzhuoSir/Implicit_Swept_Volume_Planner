@@ -1,81 +1,48 @@
 #include "esv_planner/svsdf_evaluator.h"
-#include <cmath>
+#include "esv_planner/trajectory_sampling.h"
+
 #include <algorithm>
-#include <limits>
+#include <cmath>
 
 namespace esv_planner {
 
 namespace {
-
-double adaptiveTrajectoryClearance(const Trajectory& traj,
-                                   const SvsdfEvaluator& evaluator,
-                                   double t0,
-                                   double t1,
-                                   int depth,
-                                   int max_depth,
-                                   double max_linear_step,
-                                   double max_yaw_step) {
-  const SE2State s0 = traj.sample(t0);
-  const SE2State s1 = traj.sample(t1);
-  const double c0 = evaluator.evaluate(s0);
-  const double c1 = evaluator.evaluate(s1);
-  double min_clearance = std::min(c0, c1);
-
-  if (depth >= max_depth) {
-    return min_clearance;
-  }
-
-  const double linear_delta = (s1.position() - s0.position()).norm();
-  const double yaw_delta = std::abs(normalizeAngle(s1.yaw - s0.yaw));
-  const double tm = 0.5 * (t0 + t1);
-  const SE2State sm = traj.sample(tm);
-  const double cm = evaluator.evaluate(sm);
-  min_clearance = std::min(min_clearance, cm);
-
-  if (linear_delta <= max_linear_step && yaw_delta <= max_yaw_step) {
-    return min_clearance;
-  }
-
-  min_clearance = std::min(min_clearance,
-                           adaptiveTrajectoryClearance(traj, evaluator, t0, tm,
-                                                       depth + 1, max_depth,
-                                                       max_linear_step,
-                                                       max_yaw_step));
-  min_clearance = std::min(min_clearance,
-                           adaptiveTrajectoryClearance(traj, evaluator, tm, t1,
-                                                       depth + 1, max_depth,
-                                                       max_linear_step,
-                                                       max_yaw_step));
-  return min_clearance;
-}
-
+constexpr int kMaxIntervalDepth = 3;
+constexpr int kMaxLeafSamples = 32;
+constexpr size_t kNearestSegments = 8;
 }  // namespace
 
-SvsdfEvaluator::SvsdfEvaluator() {}
+// --- Initialization ---
 
-void SvsdfEvaluator::init(const GridMap& map, const FootprintModel& footprint) {
+void SvsdfEvaluator::initGridEsdf(const GridMap& map,
+                                   const FootprintModel& footprint) {
+  mode_ = Backend::GridEsdf;
   map_ = &map;
+  footprint_ = &footprint;
+  geometry_map_ = &map.geometryMap();
+}
+
+void SvsdfEvaluator::initGeometryBodyFrame(const GeometryMap& geometry_map,
+                                            const FootprintModel& footprint) {
+  mode_ = Backend::GeometryBodyFrame;
+  geometry_map_ = &geometry_map;
   footprint_ = &footprint;
 }
 
-// Ray-casting point-in-polygon test.
-// Returns true if point (px, py) lies inside the polygon defined by verts.
-static bool pointInPolygon(double px, double py,
-                           const std::vector<Eigen::Vector2d>& verts) {
-  bool inside = false;
-  int n = static_cast<int>(verts.size());
-  for (int i = 0, j = n - 1; i < n; j = i++) {
-    double yi = verts[i].y(), yj = verts[j].y();
-    double xi = verts[i].x(), xj = verts[j].x();
-    if (((yi > py) != (yj > py)) &&
-        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
+// --- Core evaluate dispatch ---
 
 double SvsdfEvaluator::evaluate(const SE2State& state) const {
+  if (mode_ == Backend::GeometryBodyFrame) {
+    return evaluateGeometry(state);
+  }
+  return evaluateGridEsdf(state);
+}
+
+// --- GridEsdf backend ---
+
+double SvsdfEvaluator::evaluateGridEsdf(const SE2State& state) const {
+  if (!map_ || !footprint_) return -kInf;
+
   const double res = map_->resolution();
   const auto& samples = footprint_->denseBodySamples(res, 2.0 * res);
   const double c = std::cos(state.yaw);
@@ -87,78 +54,203 @@ double SvsdfEvaluator::evaluate(const SE2State& state) const {
     const double wy = state.y + s * sample.x() + c * sample.y();
     min_dist = std::min(min_dist, map_->getEsdf(wx, wy));
   }
-
   return min_dist;
 }
 
-double SvsdfEvaluator::evaluateTrajectory(const Trajectory& traj, double dt) const {
-  double min_dist = kInf;
-  double total = traj.totalDuration();
+// --- GeometryBodyFrame backend ---
 
-  // Collect time samples at regular dt intervals
-  std::vector<double> times;
-  times.reserve(static_cast<size_t>(total / dt) + 2);
-  for (double t = 0.0; t <= total; t += dt) {
-    times.push_back(t);
+double SvsdfEvaluator::evaluateGeometry(const SE2State& state) const {
+  if (!geometry_map_ || !footprint_) return -kInf;
+
+  double nearest_dist = kInf;
+  const Eigen::Vector2d nearest_world =
+      geometry_map_->nearestObstacle(state.position(), &nearest_dist);
+  if (!std::isfinite(nearest_dist)) return kInf;
+
+  auto local_segments =
+      geometry_map_->queryNearestSegments(state.position(), kNearestSegments);
+
+  const bool use_segment_candidates =
+      !local_segments.empty() &&
+      nearest_dist <= footprint_->circumscribedRadius() + 0.25;
+
+  if (!use_segment_candidates) {
+    Eigen::Matrix<double, 1, 2> single;
+    single.row(0) =
+        rotateIntoBody(nearest_world - state.position(), state.yaw).transpose();
+    return footprint_->bodyFrameSdfModel().queryBatch(single).front().signed_distance;
   }
-  // Ensure the final time is included
-  if (times.empty() || times.back() < total - 1e-9) {
-    times.push_back(total);
+
+  Eigen::Matrix<double, Eigen::Dynamic, 2> candidates(
+      static_cast<Eigen::Index>(local_segments.size() * 3 + 1), 2);
+  Eigen::Index row = 0;
+  candidates.row(row++) =
+      rotateIntoBody(nearest_world - state.position(), state.yaw).transpose();
+  for (const auto& segment : local_segments) {
+    const Eigen::Vector2d projected =
+        geometry_map_detail::projectToSegment(state.position(), segment);
+    candidates.row(row++) =
+        rotateIntoBody(projected - state.position(), state.yaw).transpose();
+    candidates.row(row++) =
+        rotateIntoBody(segment.a - state.position(), state.yaw).transpose();
+    candidates.row(row++) =
+        rotateIntoBody(segment.b - state.position(), state.yaw).transpose();
   }
+  candidates.conservativeResize(row, 2);
 
-  // Evaluate at each sample and also at midpoints between consecutive samples
-  // to catch fast-moving collisions
-  for (size_t i = 0; i < times.size(); ++i) {
-    SE2State st = traj.sample(times[i]);
-    double d = evaluate(st);
-    min_dist = std::min(min_dist, d);
+  const auto queries = footprint_->bodyFrameSdfModel().queryBatch(candidates);
+  double min_clearance = kInf;
+  for (const auto& query : queries) {
+    min_clearance = std::min(min_clearance, query.signed_distance);
+  }
+  return min_clearance;
+}
 
-    if (i + 1 < times.size()) {
-      double t_mid = 0.5 * (times[i] + times[i + 1]);
-      SE2State st_mid = traj.sample(t_mid);
-      double d_mid = evaluate(st_mid);
-      min_dist = std::min(min_dist, d_mid);
+// --- Trajectory evaluation with adaptive interval subdivision ---
+
+double SvsdfEvaluator::evaluateInterval(const Trajectory& traj,
+                                         double t0, double t1,
+                                         int depth) const {
+  const SE2State s0 = traj.sample(t0);
+  const SE2State s1 = traj.sample(t1);
+  double min_clearance = std::min(evaluate(s0), evaluate(s1));
+
+  const double linear_delta = (s1.position() - s0.position()).norm();
+  const double yaw_delta = std::abs(normalizeAngle(s1.yaw - s0.yaw));
+  const double max_linear_step = map_ ? std::max(map_->resolution(), 0.05) : 0.05;
+  const double max_yaw_step = 0.25;
+
+  if (depth >= kMaxIntervalDepth) {
+    const int leaf_steps = std::min(
+        kMaxLeafSamples,
+        std::max(1, static_cast<int>(std::ceil(std::max(
+            linear_delta / std::max(max_linear_step, 1e-6),
+            yaw_delta / std::max(max_yaw_step, 1e-6))))));
+    for (int i = 1; i < leaf_steps; ++i) {
+      const double t = static_cast<double>(i) / static_cast<double>(leaf_steps);
+      min_clearance = std::min(min_clearance, evaluate(traj.sample(t0 + (t1 - t0) * t)));
     }
+    return min_clearance;
   }
 
-  return min_dist;
+  const double tm = 0.5 * (t0 + t1);
+  min_clearance = std::min(min_clearance, evaluate(traj.sample(tm)));
+
+  if (linear_delta <= max_linear_step && yaw_delta <= max_yaw_step) {
+    return min_clearance;
+  }
+
+  const double margin_band = map_ ? std::max(0.10, map_->resolution()) : 0.10;
+  if (min_clearance > margin_band &&
+      linear_delta <= 2.0 * max_linear_step &&
+      yaw_delta <= 1.5 * max_yaw_step) {
+    return min_clearance;
+  }
+
+  min_clearance = std::min(min_clearance, evaluateInterval(traj, t0, tm, depth + 1));
+  min_clearance = std::min(min_clearance, evaluateInterval(traj, tm, t1, depth + 1));
+  return min_clearance;
 }
 
 double SvsdfEvaluator::evaluateTrajectory(const Trajectory& traj) const {
-  if (traj.empty()) {
-    return -kInf;
-  }
+  if (!footprint_ || traj.empty()) return -kInf;
 
   const double total = traj.totalDuration();
-  if (total <= 1e-9) {
-    return evaluate(traj.sample(0.0));
+  if (total <= 1e-9) return evaluate(traj.sample(0.0));
+
+  if (mode_ == Backend::GeometryBodyFrame) {
+    const auto samples = sampleTrajectoryByArcLength(traj, 0.05, 0.02);
+    double min_clearance = kInf;
+    for (const auto& state : samples) {
+      min_clearance = std::min(min_clearance, evaluate(state));
+    }
+    return min_clearance;
   }
 
-  const double max_linear_step = std::max(map_->resolution(), 1e-3);
-  const double max_yaw_step = 0.15;
-  const int max_depth = 12;
-  return adaptiveTrajectoryClearance(traj, *this, 0.0, total, 0, max_depth,
-                                     max_linear_step, max_yaw_step);
+  return evaluateInterval(traj, 0.0, total, 0);
 }
 
-void SvsdfEvaluator::gradient(const SE2State& state,
-                               Eigen::Vector2d& grad_pos, double& grad_yaw) const {
-  double eps_pos = map_->resolution() * 0.25;
-  double eps_yaw = 0.005;
+// --- Gradient (central finite differences) ---
 
-  // Central finite differences for position gradient
-  SE2State sx_plus = state;  sx_plus.x += eps_pos;
-  SE2State sx_minus = state; sx_minus.x -= eps_pos;
+void SvsdfEvaluator::gradient(const SE2State& state,
+                               Eigen::Vector2d& grad_pos,
+                               double& grad_yaw) const {
+  const double eps_pos = (mode_ == Backend::GridEsdf && map_)
+                             ? map_->resolution() * 0.25
+                             : 0.01;
+  const double eps_yaw = (mode_ == Backend::GridEsdf) ? 0.005 : 0.01;
+
+  SE2State sx_plus = state, sx_minus = state;
+  sx_plus.x += eps_pos;
+  sx_minus.x -= eps_pos;
   grad_pos.x() = (evaluate(sx_plus) - evaluate(sx_minus)) / (2.0 * eps_pos);
 
-  SE2State sy_plus = state;  sy_plus.y += eps_pos;
-  SE2State sy_minus = state; sy_minus.y -= eps_pos;
+  SE2State sy_plus = state, sy_minus = state;
+  sy_plus.y += eps_pos;
+  sy_minus.y -= eps_pos;
   grad_pos.y() = (evaluate(sy_plus) - evaluate(sy_minus)) / (2.0 * eps_pos);
 
-  // Central finite difference for yaw gradient
-  SE2State syaw_plus = state;  syaw_plus.yaw += eps_yaw;
-  SE2State syaw_minus = state; syaw_minus.yaw -= eps_yaw;
+  SE2State syaw_plus = state, syaw_minus = state;
+  syaw_plus.yaw += eps_yaw;
+  syaw_minus.yaw -= eps_yaw;
   grad_yaw = (evaluate(syaw_plus) - evaluate(syaw_minus)) / (2.0 * eps_yaw);
+}
+
+// --- Feasibility queries ---
+
+double SvsdfEvaluator::transitionClearance(const SE2State& from,
+                                            const SE2State& to,
+                                            double sample_step) const {
+  return interpolatedClearance(from, to, sample_step,
+                               [this](const SE2State& s) { return evaluate(s); });
+}
+
+double SvsdfEvaluator::segmentClearance(const std::vector<SE2State>& waypoints,
+                                         double sample_step) const {
+  if (waypoints.size() < 2) return -kInf;
+  double min_clearance = kInf;
+  for (const auto& state : waypoints) {
+    min_clearance = std::min(min_clearance, evaluate(state));
+  }
+  for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+    min_clearance = std::min(
+        min_clearance, transitionClearance(waypoints[i], waypoints[i + 1], sample_step));
+  }
+  return min_clearance;
+}
+
+// --- SafeYaw ---
+
+bool SvsdfEvaluator::safeYaw(SE2State& state, double desired_yaw,
+                              const CollisionChecker* checker) const {
+  if (!checker) {
+    state.yaw = desired_yaw;
+    return true;
+  }
+
+  const int bins = checker->numYawBins();
+  const auto wrap_bin = [bins](int bin) {
+    int wrapped = bin % bins;
+    return wrapped < 0 ? wrapped + bins : wrapped;
+  };
+
+  int desired_bin = checker->binFromYaw(desired_yaw);
+  if (checker->isYawSafe(state.x, state.y, desired_bin)) {
+    state.yaw = checker->yawFromBin(desired_bin);
+    return true;
+  }
+
+  for (int offset = 1; offset <= bins / 2; ++offset) {
+    for (int sign : {-1, 1}) {
+      const int bin = wrap_bin(desired_bin + sign * offset);
+      if (checker->isYawSafe(state.x, state.y, bin)) {
+        state.yaw = checker->yawFromBin(bin);
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 }  // namespace esv_planner

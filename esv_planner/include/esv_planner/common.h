@@ -204,4 +204,77 @@ inline double normalizeAngle(double a) {
   return std::atan2(std::sin(a), std::cos(a));
 }
 
+// --- Shared utility functions (deduplicated from multiple source files) ---
+
+inline std::vector<double> unwrapYawSequence(const std::vector<SE2State>& states) {
+  std::vector<double> yaws;
+  yaws.reserve(states.size());
+  if (states.empty()) return yaws;
+  yaws.push_back(states.front().yaw);
+  for (size_t i = 1; i < states.size(); ++i) {
+    yaws.push_back(yaws.back() + normalizeAngle(states[i].yaw - states[i - 1].yaw));
+  }
+  return yaws;
+}
+
+inline bool pointInPolygon(double px, double py,
+                           const std::vector<Eigen::Vector2d>& verts) {
+  bool inside = false;
+  int n = static_cast<int>(verts.size());
+  for (int i = 0, j = n - 1; i < n; j = i++) {
+    double yi = verts[i].y(), yj = verts[j].y();
+    double xi = verts[i].x(), xj = verts[j].x();
+    if (((yi > py) != (yj > py)) &&
+        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+inline Eigen::Vector2d rotateIntoBody(const Eigen::Vector2d& world_delta, double yaw) {
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  return Eigen::Vector2d(c * world_delta.x() + s * world_delta.y(),
+                         -s * world_delta.x() + c * world_delta.y());
+}
+
+inline Eigen::Vector2d rotateIntoWorld(const Eigen::Vector2d& body_vec, double yaw) {
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  return Eigen::Vector2d(c * body_vec.x() - s * body_vec.y(),
+                         s * body_vec.x() + c * body_vec.y());
+}
+
+inline double waypointChainLength(const std::vector<SE2State>& waypoints) {
+  if (waypoints.size() < 2) return 0.0;
+  double len = 0.0;
+  for (size_t i = 1; i < waypoints.size(); ++i) {
+    len += (waypoints[i].position() - waypoints[i - 1].position()).norm();
+  }
+  return len;
+}
+
+// Generic transition clearance: interpolates SE2 states and evaluates via callable
+template <typename EvalFn>
+double interpolatedClearance(const SE2State& from, const SE2State& to,
+                             double sample_step, EvalFn&& eval) {
+  const Eigen::Vector2d delta = to.position() - from.position();
+  const double len = delta.norm();
+  const double yaw_delta = std::abs(normalizeAngle(to.yaw - from.yaw));
+  const int linear_steps = std::max(1, static_cast<int>(std::ceil(len / sample_step)));
+  const int yaw_steps = std::max(1, static_cast<int>(std::ceil(yaw_delta / 0.10)));
+  const int n_steps = std::max(linear_steps, yaw_steps);
+  double min_clearance = kInf;
+  for (int i = 0; i <= n_steps; ++i) {
+    const double t = static_cast<double>(i) / static_cast<double>(n_steps);
+    SE2State sample;
+    sample.x = from.x + delta.x() * t;
+    sample.y = from.y + delta.y() * t;
+    sample.yaw = normalizeAngle(from.yaw + normalizeAngle(to.yaw - from.yaw) * t);
+    min_clearance = std::min(min_clearance, eval(sample));
+  }
+  return min_clearance;
+}
+
 }  // namespace esv_planner

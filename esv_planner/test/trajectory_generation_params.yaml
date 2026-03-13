@@ -1,0 +1,9 @@
+start_pose:
+  x: 0.91
+  y: 5.47
+  yaw: 0.32
+
+goal_pose:
+  x: 9.09
+  y: 3.58
+  yaw: 1.61
