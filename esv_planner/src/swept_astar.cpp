@@ -1,5 +1,7 @@
 #include "esv_planner/swept_astar.h"
 
+#include <algorithm>
+#include <cmath>
 #include <queue>
 
 namespace esv_planner {
@@ -15,15 +17,38 @@ struct OpenNode {
   }
 };
 
+double DistanceToBlockedCenters(const Eigen::Vector2d& point,
+                                const std::vector<Eigen::Vector2d>& blocked_centers) {
+  double min_distance = kInf;
+  for (const Eigen::Vector2d& center : blocked_centers) {
+    min_distance = std::min(min_distance, (point - center).norm());
+  }
+  return min_distance;
+}
+
 }  // namespace
 
 void SweptAstar::init(const GridMap& map, double required_clearance) {
   map_ = &map;
+  checker_ = nullptr;
+  required_clearance_ = required_clearance;
+}
+
+void SweptAstar::init(const GridMap& map, const CollisionChecker& checker,
+                      double required_clearance) {
+  map_ = &map;
+  checker_ = &checker;
   required_clearance_ = required_clearance;
 }
 
 AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
                                      const Eigen::Vector2d& goal) const {
+  return search(start, goal, SweptAstarSearchOptions());
+}
+
+AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
+                                     const Eigen::Vector2d& goal,
+                                     const SweptAstarSearchOptions& options) const {
   AstarSearchResult result;
   if (!map_ || !map_->ready()) {
     return result;
@@ -33,8 +58,8 @@ AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
   const GridIndex goal_idx = map_->worldToGrid(goal.x(), goal.y());
   if (!map_->isInside(start_idx.x, start_idx.y) ||
       !map_->isInside(goal_idx.x, goal_idx.y) ||
-      !isTraversable(start_idx.x, start_idx.y) ||
-      !isTraversable(goal_idx.x, goal_idx.y)) {
+      !isTraversable(start_idx.x, start_idx.y, options) ||
+      !isTraversable(goal_idx.x, goal_idx.y, options)) {
     return result;
   }
 
@@ -73,13 +98,14 @@ AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
     for (int dir = 0; dir < 8; ++dir) {
       const int nx = cx + dx8[dir];
       const int ny = cy + dy8[dir];
-      if (!map_->isInside(nx, ny) || !isTraversable(nx, ny)) {
+      if (!map_->isInside(nx, ny) || !isTraversable(nx, ny, options)) {
         continue;
       }
 
       const int next_cell = map_->linearIndex(nx, ny);
       const double tentative =
-          g_score[static_cast<size_t>(current.cell)] + dd8[dir] * map_->resolution();
+          g_score[static_cast<size_t>(current.cell)] +
+          dd8[dir] * map_->resolution() + traversalPenalty(nx, ny, options);
       if (tentative >= g_score[static_cast<size_t>(next_cell)]) {
         continue;
       }
@@ -115,7 +141,71 @@ AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
 }
 
 bool SweptAstar::isTraversable(int gx, int gy) const {
-  return map_ && map_->getEsdfCell(gx, gy) > required_clearance_;
+  return isTraversable(gx, gy, SweptAstarSearchOptions());
+}
+
+bool SweptAstar::isTraversable(int gx, int gy,
+                               const SweptAstarSearchOptions& options) const {
+  if (!map_ || !withinBounds(gx, gy, options)) {
+    return false;
+  }
+  if (map_->getEsdfCell(gx, gy) <= required_clearance_) {
+    return false;
+  }
+
+  if (checker_ != nullptr && options.min_safe_yaw_count > 0) {
+    const Eigen::Vector2d world = map_->gridToWorld(gx, gy);
+    if (static_cast<int>(checker_->safeYawIndices(world.x(), world.y()).size()) <
+        options.min_safe_yaw_count) {
+      return false;
+    }
+  }
+
+  if (options.blocked_radius > 0.0 && !options.blocked_centers.empty()) {
+    const Eigen::Vector2d world = map_->gridToWorld(gx, gy);
+    if (DistanceToBlockedCenters(world, options.blocked_centers) <
+        options.blocked_radius) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SweptAstar::withinBounds(int gx, int gy,
+                              const SweptAstarSearchOptions& options) const {
+  if (options.max_x < options.min_x || options.max_y < options.min_y) {
+    return true;
+  }
+  return gx >= options.min_x && gx <= options.max_x &&
+         gy >= options.min_y && gy <= options.max_y;
+}
+
+double SweptAstar::traversalPenalty(int gx, int gy,
+                                    const SweptAstarSearchOptions& options) const {
+  if (!map_) {
+    return 0.0;
+  }
+
+  double penalty = 0.0;
+  const double clearance = map_->getEsdfCell(gx, gy);
+  if (options.clearance_penalty > 0.0 &&
+      options.preferred_clearance > required_clearance_) {
+    penalty += options.clearance_penalty *
+               std::max(0.0, options.preferred_clearance - clearance);
+  }
+
+  if (options.blocked_center_penalty > 0.0 &&
+      options.blocked_radius > 0.0 &&
+      !options.blocked_centers.empty()) {
+    const Eigen::Vector2d world = map_->gridToWorld(gx, gy);
+    const double distance = DistanceToBlockedCenters(world, options.blocked_centers);
+    const double soft_band = 2.0 * options.blocked_radius;
+    if (distance < soft_band) {
+      penalty += options.blocked_center_penalty *
+                 (soft_band - distance) / std::max(1e-3, soft_band);
+    }
+  }
+  return penalty;
 }
 
 double SweptAstar::heuristic(int gx, int gy, int goal_x, int goal_y) const {

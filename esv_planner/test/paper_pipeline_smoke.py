@@ -69,6 +69,11 @@ class PaperPipelineSmokeTest(unittest.TestCase):
             0.0,
             "expected positive clearance from the paper-aligned backend",
         )
+        self.assertGreater(
+            len(self._non_empty_path.poses),
+            10,
+            "expected optimized trajectory with >10 poses, not a raw coarse path",
+        )
 
 
 if __name__ == "__main__":

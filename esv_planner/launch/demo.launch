@@ -3,7 +3,7 @@
        set use_map_server:=true when ros-noetic-map-server is installed
        and you want to load the bundled office map -->
   <arg name="use_map_server" default="false" />
-  <arg name="map_file" default="$(find esv_planner)/maps/map_clean_nav.yaml" />
+  <arg name="map_file" default="$(find esv_planner)/maps/map.yaml" />
   <arg name="strict_rebuild_case" default="" />
   <arg name="use_start_goal_params" default="false" />
   <node if="$(arg use_map_server)"

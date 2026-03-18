@@ -25,7 +25,9 @@ public:
   // Continuous trajectory evaluation with adaptive interval subdivision
   double evaluateTrajectory(const Trajectory& traj) const;
 
-  // Gradient of SVSDF w.r.t. position and yaw (central finite differences)
+  // Gradient of SVSDF w.r.t. position and yaw.
+  // Uses backend-specific semi-analytic gradients with finite-difference
+  // fallback near degenerate cases.
   void gradient(const SE2State& state,
                 Eigen::Vector2d& grad_pos, double& grad_yaw) const;
 

@@ -1,39 +1,78 @@
-# ESV Planner Parameters
+footprint: [0.20, 0.25, 0.20, -0.25, -0.10, -0.25, -0.10, -0.09, -0.30, -0.09, -0.30, 0.09, -0.10, 0.09, -0.10, 0.25]
+inscribed_radius: 0.10
 
-# Robot footprint (T-shape, flat list of x,y pairs), overall envelope 0.5m x 0.5m
-footprint: [0.2, 0.25, 0.2, -0.25, -0.1, -0.25, -0.1, -0.09, -0.3, -0.09, -0.3, 0.09, -0.1, 0.09, -0.1, 0.25]
-inscribed_radius: 0.08
+meshTopic: "/esv_planner/mesh"
+edgeTopic: "/esv_planner/mesh_edges"
+vertexTopic: "/esv_planner/mesh_vertices"
+inputdata: "meshes/robot_t_shape.obj"
+loadStartEnd: false
+poly_params: [0.0, 0.0, 0.0]
 
-paper:
-  front_end_clearance: 0.31
-  line_of_sight_clearance: 0.16
-  local_aabb_half_extent: 0.85
-  max_segment_length: 1.1
-  max_support_points: 24
-  backend:
-    max_iterations: 40
-    nominal_speed: 0.9
-    min_piece_duration: 0.35
-    anchor_weight: 4.0
-    smooth_weight: 4.0
-    obstacle_weight: 50.0
-    safety_margin: 0.03
-    obstacle_cutoff_distance: 1.0
-    sample_time_step: 0.04
-    lmbm_max_iterations: 45
-    lmbm_max_evaluations: 250
-    lmbm_timeout: 30.0
-    lmbm_bundle_size: 2
-    lmbm_ini_corrections: 7
-    lmbm_max_corrections: 15
+selfmapresu: 0.10
+threads_num: 8
+momentum: 0.0
+eps: 0.08
+transparency: 1.0
+testRate: 0.0
+ts: 2.0
 
-# Default start/goal
+vehicleMass: 0.61
+gravAcc: 9.8
+horizDrag: 0.10
+vertDrag: 0.10
+parasDrag: 0.01
+speedEps: 0.0001
+
+voxelWidth: 0.10
+mapBound: [-10.0, 20.0, -5.0, 55.0, -0.1, 0.1]
+occupancy_resolution: 0.10
+debug_output: false
+sta_threshold: 1
+colli_thres: 0.05
+
+kernel_size: 7
+kernel_yaw_num: 18
+front_end_safeh: 0.05
+
+topology:
+  num_samples: 15000
+  knn: 50
+  max_paths: 10
+
+enableearlyExit: false
+debugpause: 1
+
+smoothingEps: 1.0e-2
+integralIntervs: 10
+relCostTol: 1.0e-8
+relCostTolMidEnd: 1.0e-8
+vmax: 1.2
+omgmax: 2.5
+thetamax: 6.0
+
+weight_v: 10.0
+weight_a: 20.0
+weight_p: 150.0
+weight_pr: 8.0
+weight_ar: 0.0
+weight_omg: 6.0
+weight_theta: 6.0
+rho_mid_end: 1.0
+rho: 2.0
+safety_hor: 0.08
+inittime: 0.9
+
+mem_size: 16
+past: 64
+min_step: 1.0e-32
+g_epsilon: 0.0
+
 start_pose:
-  x: 0.91
-  y: 5.47
-  yaw: 0.32
+  x: 3.16
+  y: 45.92
+  yaw: -1.98
 
 goal_pose:
-  x: 9.09
-  y: 3.58
-  yaw: 1.61
+  x: 5.01
+  y: 11.73
+  yaw: -0.14
