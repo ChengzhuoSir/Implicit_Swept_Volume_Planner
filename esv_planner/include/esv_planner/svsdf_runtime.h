@@ -13,7 +13,6 @@
 #include "esv_planner/hybrid_astar.h"
 #include "esv_planner/se2_sequence_generator.h"
 #include "esv_planner/se2_svsdf_solver.h"
-#include "esv_planner/strict_frontend.h"
 #include "esv_planner/svsdf_evaluator.h"
 #include "esv_planner/topology_planner.h"
 #include "esv_planner/trajectory_optimizer.h"
@@ -76,7 +75,6 @@ class SvsdfRuntime {
   TopologyPlanner topology_planner_;
   SvsdfEvaluator svsdf_evaluator_;
   TrajectoryOptimizer optimizer_;
-  StrictFrontend strict_frontend_;
   Se2SvsdfSolver strict_solver_;
 
   OptimizerParams optimizer_params_;

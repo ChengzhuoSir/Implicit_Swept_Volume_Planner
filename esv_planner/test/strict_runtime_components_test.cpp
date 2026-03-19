@@ -3,10 +3,9 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <ros/ros.h>
 
-#include "esv_planner/se2_svsdf_solver.h"
-#include "esv_planner/strict_frontend.h"
 #include "esv_planner/footprint_model.h"
 #include "esv_planner/grid_map.h"
+#include "esv_planner/se2_svsdf_solver.h"
 
 namespace esv_planner {
 namespace {
@@ -54,17 +53,6 @@ TEST(StrictRuntimeComponentsTest, StrictSe2SolverReturnsNonEmptyTrajectory) {
   Trajectory traj;
   EXPECT_TRUE(solver.Solve(segment, &traj));
   EXPECT_FALSE(traj.empty());
-}
-
-TEST(StrictRuntimeComponentsTest, StrictFrontendReturnsMultipleCandidates) {
-  StrictFrontend frontend;
-  frontend.InitializeForTesting(MakeFootprint());
-  ASSERT_TRUE(frontend.UpdateMap(*MakeOpenMap()));
-
-  const std::vector<TopoPath> candidates =
-      frontend.Search(SE2State(1.0, 1.0, 0.0), SE2State(8.0, 6.0, 0.0));
-
-  EXPECT_GE(candidates.size(), 2U);
 }
 
 nav_msgs::OccupancyGrid::Ptr MakeNarrowPassageMap() {

@@ -44,6 +44,8 @@ private:
   bool isTraversable(int gx, int gy) const;
   bool isTraversable(int gx, int gy,
                      const SweptAstarSearchOptions& options) const;
+  bool transitionTraversable(int from_x, int from_y, int to_x, int to_y,
+                             const SweptAstarSearchOptions& options) const;
   bool withinBounds(int gx, int gy,
                     const SweptAstarSearchOptions& options) const;
   double traversalPenalty(int gx, int gy,

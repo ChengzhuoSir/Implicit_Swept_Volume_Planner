@@ -186,6 +186,30 @@ std::vector<TopoWaypoint> DiscretizePath(const std::vector<TopoWaypoint>& points
   return output;
 }
 
+bool ShouldPreserveWaypoint(const TopoWaypoint& waypoint, const GridMap& map,
+                            const CollisionChecker& checker, double preserve_clearance,
+                            int min_safe_yaw_count) {
+  const double clearance = map.getEsdf(waypoint.pos.x(), waypoint.pos.y());
+  if (!std::isfinite(clearance) || clearance < preserve_clearance) {
+    return true;
+  }
+  return static_cast<int>(
+             checker.safeYawIndices(waypoint.pos.x(), waypoint.pos.y()).size()) <
+         min_safe_yaw_count;
+}
+
+bool RangeContainsPreservedWaypoint(const std::vector<int>& preserve_prefix, size_t start,
+                                    size_t end) {
+  if (start >= end || end >= preserve_prefix.size()) {
+    return false;
+  }
+  const size_t query_begin = start + 1;
+  if (query_begin >= end) {
+    return false;
+  }
+  return preserve_prefix[end] > preserve_prefix[query_begin];
+}
+
 std::pair<double, std::vector<int>> DijkstraFull(
     int src, int dst, int n, const std::vector<std::vector<std::pair<int, double>>>& adjacency,
     const std::set<std::pair<int, int>>& blocked_edges,
@@ -238,27 +262,46 @@ TopologyPlanner::TopologyPlanner() {}
 
 void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker, int num_samples,
                            int knn, int max_paths, double inscribed_radius) {
+  const bool params_changed =
+      map_ == nullptr || num_samples_ != num_samples || knn_ != knn ||
+      max_paths_ != max_paths || std::abs(inscribed_radius_ - inscribed_radius) > 1e-9;
+  const bool map_changed =
+      map_ == nullptr || cached_width_ != map.width() ||
+      cached_height_ != map.height() ||
+      std::abs(cached_resolution_ - map.resolution()) > 1e-9 ||
+      std::abs(cached_origin_x_ - map.originX()) > 1e-9 ||
+      std::abs(cached_origin_y_ - map.originY()) > 1e-9;
   map_ = &map;
   checker_ = &checker;
   num_samples_ = num_samples;
   knn_ = knn;
   max_paths_ = max_paths;
   inscribed_radius_ = inscribed_radius;
+  cached_width_ = map.width();
+  cached_height_ = map.height();
+  cached_resolution_ = map.resolution();
+  cached_origin_x_ = map.originX();
+  cached_origin_y_ = map.originY();
+  if (!base_roadmap_ready_ || params_changed || map_changed) {
+    rebuildBaseRoadmap();
+  }
   ROS_INFO("TopologyPlanner initialized: num_samples=%d, knn=%d, max_paths=%d, inscribed_radius=%.3f",
            num_samples_, knn_, max_paths_, inscribed_radius_);
 }
 
-void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Vector2d& goal) {
-  nodes_.clear();
-  adjacency_.clear();
-  nodes_.push_back(start);
-  nodes_.push_back(goal);
-
+void TopologyPlanner::rebuildBaseRoadmap() {
+  base_nodes_.clear();
+  base_adjacency_.clear();
+  if (map_ == nullptr || checker_ == nullptr) {
+    base_roadmap_ready_ = false;
+    return;
+  }
   const double x_min = map_->originX();
   const double y_min = map_->originY();
   const double x_max = x_min + static_cast<double>(map_->width()) * map_->resolution();
   const double y_max = y_min + static_cast<double>(map_->height()) * map_->resolution();
 
+  base_nodes_.reserve(static_cast<size_t>(num_samples_));
   int accepted = 0;
   for (int i = 1; accepted < num_samples_; ++i) {
     const double x = x_min + HaltonSequence(i, 2) * (x_max - x_min);
@@ -266,22 +309,22 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
     const double node_clearance = inscribed_radius_ + map_->resolution();
     if (map_->getEsdf(x, y) > node_clearance &&
         !checker_->safeYawIndices(x, y).empty()) {
-      nodes_.push_back(Eigen::Vector2d(x, y));
+      base_nodes_.push_back(Eigen::Vector2d(x, y));
       ++accepted;
     }
   }
 
-  adjacency_.assign(nodes_.size(), std::vector<std::pair<int, double>>());
+  base_adjacency_.assign(base_nodes_.size(), std::vector<std::pair<int, double>>());
   int total_edges = 0;
-  for (size_t i = 0; i < nodes_.size(); ++i) {
+  for (size_t i = 0; i < base_nodes_.size(); ++i) {
     std::vector<std::pair<double, int>> distances;
-    distances.reserve(nodes_.size());
-    for (size_t j = 0; j < nodes_.size(); ++j) {
+    distances.reserve(base_nodes_.size());
+    for (size_t j = 0; j < base_nodes_.size(); ++j) {
       if (i == j) {
         continue;
       }
       distances.push_back(
-          std::make_pair((nodes_[i] - nodes_[j]).norm(), static_cast<int>(j)));
+          std::make_pair((base_nodes_[i] - base_nodes_[j]).norm(), static_cast<int>(j)));
     }
     std::sort(distances.begin(), distances.end());
 
@@ -290,13 +333,76 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
       if (connections >= knn_) {
         break;
       }
-      if (lineCollisionFree(nodes_[i], nodes_[static_cast<size_t>(item.second)])) {
-        adjacency_[i].push_back(std::make_pair(item.second, item.first));
+      if (lineCollisionFree(base_nodes_[i], base_nodes_[static_cast<size_t>(item.second)])) {
+        base_adjacency_[i].push_back(std::make_pair(item.second, item.first));
         ++connections;
         ++total_edges;
       }
     }
   }
+  base_roadmap_ready_ = true;
+  ROS_INFO("Topology base roadmap cached: nodes=%zu, edges=%d",
+           base_nodes_.size(), total_edges);
+}
+
+void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Vector2d& goal) {
+  if (!base_roadmap_ready_) {
+    rebuildBaseRoadmap();
+  }
+
+  nodes_.clear();
+  adjacency_.clear();
+  nodes_.reserve(base_nodes_.size() + 2);
+  nodes_.push_back(start);
+  nodes_.push_back(goal);
+  nodes_.insert(nodes_.end(), base_nodes_.begin(), base_nodes_.end());
+
+  adjacency_.assign(nodes_.size(), std::vector<std::pair<int, double>>());
+  int total_edges = 0;
+  for (size_t i = 0; i < base_adjacency_.size(); ++i) {
+    for (const auto& edge : base_adjacency_[i]) {
+      adjacency_[i + 2].push_back(std::make_pair(edge.first + 2, edge.second));
+      ++total_edges;
+    }
+  }
+
+  const auto connect_special_node = [&](int special_index) {
+    std::vector<std::pair<double, int>> distances;
+    distances.reserve(base_nodes_.size());
+    for (size_t j = 0; j < base_nodes_.size(); ++j) {
+      distances.push_back(
+          std::make_pair((nodes_[static_cast<size_t>(special_index)] - base_nodes_[j]).norm(),
+                         static_cast<int>(j + 2)));
+    }
+    std::sort(distances.begin(), distances.end());
+
+    int connections = 0;
+    for (const auto& item : distances) {
+      if (connections >= knn_) {
+        break;
+      }
+      if (!lineCollisionFree(nodes_[static_cast<size_t>(special_index)],
+                             nodes_[static_cast<size_t>(item.second)])) {
+        continue;
+      }
+      adjacency_[static_cast<size_t>(special_index)].push_back(
+          std::make_pair(item.second, item.first));
+      adjacency_[static_cast<size_t>(item.second)].push_back(
+          std::make_pair(special_index, item.first));
+      total_edges += 2;
+      ++connections;
+    }
+  };
+
+  connect_special_node(0);
+  connect_special_node(1);
+  if (lineCollisionFree(start, goal)) {
+    const double direct_distance = (goal - start).norm();
+    adjacency_[0].push_back(std::make_pair(1, direct_distance));
+    adjacency_[1].push_back(std::make_pair(0, direct_distance));
+    total_edges += 2;
+  }
+
   ROS_INFO("Topology Roadmap: nodes=%zu, edges=%d, start_neighbors=%zu, goal_neighbors=%zu",
            nodes_.size(), total_edges, adjacency_[0].size(), adjacency_[1].size());
 }
@@ -577,6 +683,8 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& waypoint, double safe_
 void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
   const double safe_dist = inscribed_radius_ + map_->resolution();
   const double resolution = map_->resolution();
+  const double preserve_clearance = safe_dist + map_->resolution();
+  const int min_safe_yaw_count = 4;
 
   for (TopoPath& path : paths) {
     if (path.waypoints.size() <= 2) {
@@ -595,6 +703,15 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       }
     }
     AssignTangentYaw(&discrete);
+    std::vector<int> discrete_preserve_prefix(discrete.size() + 1, 0);
+    for (size_t idx = 0; idx < discrete.size(); ++idx) {
+      discrete_preserve_prefix[idx + 1] =
+          discrete_preserve_prefix[idx] +
+          (ShouldPreserveWaypoint(discrete[idx], *map_, *checker_, preserve_clearance,
+                                  min_safe_yaw_count)
+               ? 1
+               : 0);
+    }
 
     std::vector<TopoWaypoint> result;
     result.push_back(discrete.front());
@@ -608,6 +725,9 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       size_t best_j = i + 1;
       bool found_shortcut = false;
       for (size_t j = discrete.size() - 1; j > i + 1; --j) {
+        if (RangeContainsPreservedWaypoint(discrete_preserve_prefix, i, j)) {
+          continue;
+        }
         TopoWaypoint candidate = WithIncomingYaw(anchor, discrete[j]);
         if (configurationLineFree(anchor, candidate)) {
           best_j = j;
@@ -673,6 +793,11 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
     AssignTangentYaw(&result);
 
     for (size_t k = 1; k + 1 < result.size();) {
+      if (ShouldPreserveWaypoint(result[k], *map_, *checker_, preserve_clearance,
+                                 min_safe_yaw_count)) {
+        ++k;
+        continue;
+      }
       const TopoWaypoint merged = WithIncomingYaw(result[k - 1], result[k + 1]);
       if (configurationLineFree(result[k - 1], merged)) {
         result.erase(result.begin() + static_cast<long>(k));
@@ -705,6 +830,7 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
 bool TopologyPlanner::isTopologicallyDistinct(
     const TopoPath& path, const std::vector<TopoPath>& existing) const {
   const int sample_count = 40;
+  const double clearance_margin = inscribed_radius_ + 2.0 * map_->resolution();
 
   const auto interpolate = [](const TopoPath& topo_path, double fraction) -> Eigen::Vector2d {
     if (topo_path.waypoints.empty()) {
@@ -748,8 +874,8 @@ bool TopologyPlanner::isTopologicallyDistinct(
       for (int s = 0; s <= checks; ++s) {
         const double t = static_cast<double>(s) / static_cast<double>(checks);
         const Eigen::Vector2d point = p1 + t * (p2 - p1);
-        const GridIndex index = map_->worldToGrid(point.x(), point.y());
-        if (map_->isOccupied(index.x, index.y)) {
+        if (map_->getEsdf(point.x(), point.y()) < clearance_margin ||
+            checker_->safeYawIndices(point.x(), point.y()).empty()) {
           equivalent = false;
           break;
         }

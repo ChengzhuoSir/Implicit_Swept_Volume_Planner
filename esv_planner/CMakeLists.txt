@@ -58,7 +58,6 @@ set(ESV_PLANNER_SOURCES
   src/svsdf_evaluator.cpp
   src/trajectory_optimizer.cpp
   src/se2_svsdf_solver.cpp
-  src/strict_frontend.cpp
   src/implicit_svsdf/grid_map_3d.cpp
   src/implicit_svsdf/pcs_map_manager.cpp
   src/implicit_svsdf/mesh_shape_model.cpp
@@ -142,7 +141,6 @@ if(CATKIN_ENABLE_TESTING)
     src/footprint_model.cpp
     src/occupancy_grid_bridge.cpp
     src/se2_svsdf_solver.cpp
-    src/strict_frontend.cpp
     src/implicit_svsdf/grid_map_3d.cpp
     src/implicit_svsdf/pcs_map_manager.cpp
     src/implicit_svsdf/mesh_shape_model.cpp

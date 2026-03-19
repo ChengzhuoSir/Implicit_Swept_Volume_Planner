@@ -26,7 +26,8 @@ class Se2SvsdfSolver {
                   const FootprintModel& footprint);
   void InitializeForTesting(const FootprintModel& footprint);
   bool UpdateMap(const nav_msgs::OccupancyGrid& map);
-  bool Solve(const std::vector<SE2State>& segment, Trajectory* trajectory);
+  bool Solve(const std::vector<SE2State>& segment, Trajectory* trajectory,
+             bool preserve_shape = false);
   void setGridMapForMidend(const GridMap* map);
 
   bool ready() const { return ready_; }

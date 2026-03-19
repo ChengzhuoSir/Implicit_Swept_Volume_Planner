@@ -325,7 +325,7 @@ Trajectory Se2SvsdfSolver::ConvertTrajectory(
 }
 
 bool Se2SvsdfSolver::Solve(const std::vector<SE2State>& segment,
-                           Trajectory* trajectory) {
+                           Trajectory* trajectory, bool preserve_shape) {
   if (!ready_ || trajectory == nullptr) {
     return false;
   }
@@ -350,6 +350,11 @@ bool Se2SvsdfSolver::Solve(const std::vector<SE2State>& segment,
                                           opt_x);
   if (!mid_ok) {
     return false;
+  }
+
+  if (preserve_shape) {
+    *trajectory = ConvertTrajectory(strict_traj);
+    return !trajectory->empty();
   }
 
   swept_volume_manager_->updateTraj(strict_traj);

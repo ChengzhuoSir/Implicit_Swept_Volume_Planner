@@ -98,7 +98,8 @@ AstarSearchResult SweptAstar::search(const Eigen::Vector2d& start,
     for (int dir = 0; dir < 8; ++dir) {
       const int nx = cx + dx8[dir];
       const int ny = cy + dy8[dir];
-      if (!map_->isInside(nx, ny) || !isTraversable(nx, ny, options)) {
+      if (!map_->isInside(nx, ny) || !isTraversable(nx, ny, options) ||
+          !transitionTraversable(cx, cy, nx, ny, options)) {
         continue;
       }
 
@@ -166,6 +167,51 @@ bool SweptAstar::isTraversable(int gx, int gy,
     if (DistanceToBlockedCenters(world, options.blocked_centers) <
         options.blocked_radius) {
       return false;
+    }
+  }
+  return true;
+}
+
+bool SweptAstar::transitionTraversable(
+    int from_x, int from_y, int to_x, int to_y,
+    const SweptAstarSearchOptions& options) const {
+  if (!map_) {
+    return false;
+  }
+
+  const Eigen::Vector2d start = map_->gridToWorld(from_x, from_y);
+  const Eigen::Vector2d goal = map_->gridToWorld(to_x, to_y);
+  const Eigen::Vector2d delta = goal - start;
+  const double distance = delta.norm();
+  const double yaw = distance > 1e-9 ? std::atan2(delta.y(), delta.x()) : 0.0;
+  const double step = std::max(0.02, 0.5 * map_->resolution());
+  const int samples =
+      std::max(1, static_cast<int>(std::ceil(distance / std::max(1e-3, step))));
+
+  for (int i = 0; i <= samples; ++i) {
+    const double t = static_cast<double>(i) / static_cast<double>(samples);
+    const Eigen::Vector2d point = start + t * delta;
+    const GridIndex cell = map_->worldToGrid(point.x(), point.y());
+    if (!map_->isInside(cell.x, cell.y) || !withinBounds(cell.x, cell.y, options)) {
+      return false;
+    }
+    if (map_->getEsdf(point.x(), point.y()) <= required_clearance_) {
+      return false;
+    }
+    if (options.blocked_radius > 0.0 && !options.blocked_centers.empty() &&
+        DistanceToBlockedCenters(point, options.blocked_centers) <
+            options.blocked_radius) {
+      return false;
+    }
+    if (checker_ != nullptr) {
+      if (!checker_->isFree(SE2State(point.x(), point.y(), yaw))) {
+        return false;
+      }
+      if (options.min_safe_yaw_count > 0 &&
+          static_cast<int>(checker_->safeYawIndices(point.x(), point.y()).size()) <
+              options.min_safe_yaw_count) {
+        return false;
+      }
     }
   }
   return true;

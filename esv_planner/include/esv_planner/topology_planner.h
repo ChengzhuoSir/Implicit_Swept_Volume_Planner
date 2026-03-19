@@ -33,6 +33,7 @@ class TopologyPlanner {
   bool isTopologicallyDistinct(const TopoPath& path,
                                const std::vector<TopoPath>& existing) const;
   bool pushPointFromObstacle(TopoWaypoint& waypoint, double safe_dist) const;
+  void rebuildBaseRoadmap();
   TopoPath dijkstra(int src, int dst, const std::vector<double>& node_penalty,
                     const std::set<std::pair<int, int>>& blocked_edges,
                     const std::unordered_set<int>& blocked_nodes) const;
@@ -46,9 +47,17 @@ class TopologyPlanner {
   int knn_ = 18;
   int max_paths_ = 14;
   double inscribed_radius_ = 0.1;
+  bool base_roadmap_ready_ = false;
+  int cached_width_ = 0;
+  int cached_height_ = 0;
+  double cached_resolution_ = 0.0;
+  double cached_origin_x_ = 0.0;
+  double cached_origin_y_ = 0.0;
 
   std::vector<Eigen::Vector2d> nodes_;
   std::vector<std::vector<std::pair<int, double>>> adjacency_;
+  std::vector<Eigen::Vector2d> base_nodes_;
+  std::vector<std::vector<std::pair<int, double>>> base_adjacency_;
 };
 
 }  // namespace esv_planner

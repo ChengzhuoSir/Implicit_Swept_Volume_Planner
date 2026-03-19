@@ -110,6 +110,16 @@ Trajectory ConcatenateTrajectories(const std::vector<Trajectory>& segment_trajec
   return result;
 }
 
+void AppendTrajectoryPieces(const Trajectory& source, Trajectory* target) {
+  if (target == nullptr || source.empty()) {
+    return;
+  }
+  target->pos_pieces.insert(target->pos_pieces.end(), source.pos_pieces.begin(),
+                            source.pos_pieces.end());
+  target->yaw_pieces.insert(target->yaw_pieces.end(), source.yaw_pieces.begin(),
+                            source.yaw_pieces.end());
+}
+
 double ApproximateTrajectoryLength(const Trajectory& traj) {
   if (traj.empty()) {
     return kInf;
@@ -273,6 +283,7 @@ bool CorridorLineFree(const Eigen::Vector2d& start, const Eigen::Vector2d& goal,
                       const std::vector<Eigen::Vector2d>& blocked_centers,
                       double blocked_radius, int min_safe_yaw_count) {
   const double distance = (goal - start).norm();
+  const double yaw = distance > 1e-9 ? std::atan2((goal - start).y(), (goal - start).x()) : 0.0;
   const double step = std::max(0.02, 0.5 * map.resolution());
   const int samples = std::max(1, static_cast<int>(std::ceil(distance / step)));
   for (int i = 0; i <= samples; ++i) {
@@ -281,6 +292,9 @@ bool CorridorLineFree(const Eigen::Vector2d& start, const Eigen::Vector2d& goal,
     if (!CorridorPositionAllowed(map, checker, point, required_clearance,
                                  blocked_centers, blocked_radius,
                                  min_safe_yaw_count)) {
+      return false;
+    }
+    if (!checker.isFree(SE2State(point.x(), point.y(), yaw))) {
       return false;
     }
   }
@@ -500,7 +514,6 @@ void SvsdfRuntime::PushSegmentWaypointsFromObstacles(
 
 void SvsdfRuntime::Initialize(ros::NodeHandle& nh, ros::NodeHandle& pnh) {
   LoadParameters(pnh);
-  strict_frontend_.Initialize(nh, pnh, footprint_);
   strict_solver_.Initialize(nh, pnh, footprint_);
   initialized_ = true;
 }
@@ -578,12 +591,12 @@ bool SvsdfRuntime::UpdateMap(const nav_msgs::OccupancyGrid& map) {
   se2_generator_.init(grid_map_, collision_checker_, se2_disc_step_,
                       max_push_attempts_);
   hybrid_astar_.init(grid_map_, collision_checker_, hybrid_astar_params_);
+  const double topo_safe_dist = 0.25;
   topology_planner_.init(grid_map_, collision_checker_, topology_num_samples_,
-                         topology_knn_, topology_max_paths_,
-                         footprint_.inscribedRadius());
+                         topology_knn_, topology_max_paths_, topo_safe_dist);
   svsdf_evaluator_.initGridEsdf(grid_map_, footprint_);
   optimizer_.init(grid_map_, svsdf_evaluator_, optimizer_params_);
-  if (!strict_frontend_.UpdateMap(map) || !strict_solver_.UpdateMap(map)) {
+  if (!strict_solver_.UpdateMap(map)) {
     map_ready_ = false;
     return false;
   }
@@ -605,13 +618,12 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
 
   const ros::WallTime total_start = ros::WallTime::now();
   const ros::WallTime search_start = ros::WallTime::now();
+  const Eigen::Vector2d start_2d(start_state.x, start_state.y);
+  const Eigen::Vector2d goal_2d(goal_state.x, goal_state.y);
 
   const double topo_safe_dist = 0.25; // Ensure connectivity for topological roadmap
   topology_planner_.init(grid_map_, collision_checker_, topology_num_samples_,
                          topology_knn_, topology_max_paths_, topo_safe_dist);
-
-  const Eigen::Vector2d start_2d(start_state.x, start_state.y);
-  const Eigen::Vector2d goal_2d(goal_state.x, goal_state.y);
   topology_planner_.buildRoadmap(start_2d, goal_2d);
   std::vector<TopoPath> topo_paths = topology_planner_.searchPaths();
   
@@ -619,6 +631,14 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
     ROS_INFO("Runtime stage 1: Found %zu topological paths, starting shortening (Algorithm 1)",
              topo_paths.size());
     topology_planner_.shortenPaths(topo_paths);
+    const size_t shortened_count = topo_paths.size();
+    const size_t max_eval_paths =
+        shortened_count > 3 ? 2 : std::min<size_t>(shortened_count, 3);
+    if (topo_paths.size() > max_eval_paths) {
+      topo_paths.resize(max_eval_paths);
+    }
+    ROS_INFO("Runtime stage 1: evaluating %zu shortened paths (from %zu)",
+             topo_paths.size(), shortened_count);
   }
 
   std::vector<SE2State> hybrid_path;
@@ -638,12 +658,14 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
   result.stats.search_time = (ros::WallTime::now() - search_start).toSec();
 
   const ros::WallTime optimize_start = ros::WallTime::now();
+  const double optimize_timeout_sec =
+      topo_paths.size() > 1 ? 20.0 : 15.0;
   std::vector<CandidateResult> candidate_results;
   std::vector<CandidateResult> degraded_results;
   candidate_results.reserve(topo_paths.size());
   for (size_t i = 0; i < topo_paths.size(); ++i) {
     const double elapsed = (ros::WallTime::now() - optimize_start).toSec();
-    if (elapsed > 60.0) {
+    if (elapsed > optimize_timeout_sec) {
       ROS_WARN("Plan() optimization timeout after %.1fs, evaluated %zu/%zu paths",
                elapsed, i, topo_paths.size());
       break;
@@ -934,42 +956,14 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
       return result;
     }
 
-    // --- ENHANCED RECOVERY: Global SE(2) Escalation ---
-    ROS_WARN("Candidate infeasible (clearance=%.3f). Escalating ALL segments to strict SE(2)...", min_clearance);
-    for (size_t i = 0; i < segments.size(); ++i) {
-      if (!escalated[i] && segments[i].risk == RiskLevel::LOW) {
-        if (!SolveStrictSegment(segments[i].waypoints, &segment_trajectories[i])) {
-          ROS_WARN("Global escalation failed on segment %zu", i);
-          return CandidateResult();
-        }
-      }
-    }
-
-    const Trajectory global_se2_traj = optimizer_.stitch(segments, segment_trajectories);
-    if (!global_se2_traj.empty() &&
-        IsTrajectoryFeasible(global_se2_traj, &min_clearance, &max_vel, &max_acc)) {
-      ROS_INFO("Global SE(2) escalation SUCCEEDED: clearance=%.3f", min_clearance);
-      result.trajectory = global_se2_traj;
-      result.min_clearance = min_clearance;
-      result.max_vel = max_vel;
-      result.max_acc = max_acc;
-      result.high_risk_segments = static_cast<int>(segments.size());
-      MaybeImproveTailTrajectory(segments, segment_trajectories, &result);
-      return result;
-    }
-
-    ROS_WARN("Path degraded: infeasible even after global SE(2) escalation (clearance=%.3f)", min_clearance);
-    // Return the trajectory anyway with its clearance info so Plan() can use it as a fallback
-    if (!global_se2_traj.empty()) {
-      result.trajectory = global_se2_traj;
-      result.min_clearance = min_clearance;
-      result.max_vel = max_vel;
-      result.max_acc = max_acc;
-      result.high_risk_segments = static_cast<int>(segments.size());
-      result.degraded = true;
-      return result;
-    }
-    return CandidateResult();
+    ROS_WARN("Path degraded after local recovery failure (clearance=%.3f)", min_clearance);
+    result.trajectory = full_traj;
+    result.min_clearance = min_clearance;
+    result.max_vel = max_vel;
+    result.max_acc = max_acc;
+    result.high_risk_segments = high_risk_segments;
+    result.degraded = true;
+    return result;
   }
 
   result.trajectory = full_traj;
@@ -1106,8 +1100,6 @@ bool SvsdfRuntime::TryRecoverBottleneck(
   }
 
   const ros::WallTime recover_start = ros::WallTime::now();
-  const double kRecoverTimeoutSec = 10.0;
-
   const size_t segment_count = std::min(segments.size(), segment_trajectories.size());
   if (segment_count == 0) {
     return false;
@@ -1118,6 +1110,9 @@ bool SvsdfRuntime::TryRecoverBottleneck(
     return false;
   }
 
+  std::vector<ClearanceProbe> hotspots(1, worst);
+  const double recover_timeout_sec = 8.0;
+
   const size_t culprit_index = SegmentIndexFromTime(segment_trajectories, worst.time);
   const double anchor_clearance_threshold = std::max(0.05, optimizer_params_.safety_margin);
   const double endpoint_pos_tolerance =
@@ -1125,62 +1120,193 @@ bool SvsdfRuntime::TryRecoverBottleneck(
   const double endpoint_yaw_tolerance =
       std::max(0.20, hybrid_astar_params_.goal_tolerance_yaw + 0.10);
 
-  std::vector<std::pair<size_t, size_t>> candidate_windows;
-  auto add_window = [&](size_t begin, size_t end) {
+  struct RecoveryWindow {
+    size_t begin = 0;
+    size_t end = 0;
+    size_t culprit_index = 0;
+    ClearanceProbe hotspot;
+  };
+
+  std::vector<RecoveryWindow> candidate_windows;
+  auto add_window = [&](size_t begin, size_t end, size_t window_culprit_index,
+                        const ClearanceProbe& hotspot) {
     if (begin > end || end >= segment_count) {
       return;
     }
-    for (const auto& window : candidate_windows) {
-      if (window.first == begin && window.second == end) {
+    for (const RecoveryWindow& window : candidate_windows) {
+      if (window.begin == begin && window.end == end) {
         return;
       }
     }
-    candidate_windows.emplace_back(begin, end);
+    RecoveryWindow window;
+    window.begin = begin;
+    window.end = end;
+    window.culprit_index = window_culprit_index;
+    window.hotspot = hotspot;
+    candidate_windows.push_back(window);
   };
 
-  size_t risky_begin = culprit_index;
-  size_t risky_end = culprit_index;
-  if (segments[culprit_index].risk == RiskLevel::LOW) {
-    if (culprit_index > 0 && segments[culprit_index - 1].risk == RiskLevel::HIGH) {
-      risky_begin = culprit_index - 1;
+  auto add_windows_for_hotspot = [&](const ClearanceProbe& hotspot) {
+    const size_t hotspot_culprit_index =
+        SegmentIndexFromTime(segment_trajectories, hotspot.time);
+
+    size_t risky_begin = hotspot_culprit_index;
+    size_t risky_end = hotspot_culprit_index;
+    if (segments[hotspot_culprit_index].risk == RiskLevel::LOW) {
+      if (hotspot_culprit_index > 0 &&
+          segments[hotspot_culprit_index - 1].risk == RiskLevel::HIGH) {
+        risky_begin = hotspot_culprit_index - 1;
+      }
+      if (hotspot_culprit_index + 1 < segment_count &&
+          segments[hotspot_culprit_index + 1].risk == RiskLevel::HIGH) {
+        risky_end = hotspot_culprit_index + 1;
+      }
     }
-    if (culprit_index + 1 < segment_count &&
-        segments[culprit_index + 1].risk == RiskLevel::HIGH) {
-      risky_end = culprit_index + 1;
+    while (risky_begin > 0 && segments[risky_begin - 1].risk == RiskLevel::HIGH) {
+      --risky_begin;
     }
-  }
-  while (risky_begin > 0 && segments[risky_begin - 1].risk == RiskLevel::HIGH) {
-    --risky_begin;
-  }
-  while (risky_end + 1 < segment_count &&
-         segments[risky_end + 1].risk == RiskLevel::HIGH) {
-    ++risky_end;
+    while (risky_end + 1 < segment_count &&
+           segments[risky_end + 1].risk == RiskLevel::HIGH) {
+      ++risky_end;
+    }
+
+    const size_t local_begin = risky_begin > 0 ? risky_begin - 1 : risky_begin;
+    const size_t local_end = std::min(segment_count - 1, risky_end + 1);
+    const size_t expanded_begin = local_begin > 0 ? local_begin - 1 : local_begin;
+    const size_t expanded_end = std::min(segment_count - 1, local_end + 1);
+
+    add_window(expanded_begin, expanded_end, hotspot_culprit_index, hotspot);
+    add_window(local_begin, local_end, hotspot_culprit_index, hotspot);
+    add_window(hotspot_culprit_index, hotspot_culprit_index, hotspot_culprit_index,
+               hotspot);
+  };
+
+  for (const ClearanceProbe& hotspot : hotspots) {
+    add_windows_for_hotspot(hotspot);
   }
 
-  const size_t local_begin = risky_begin > 0 ? risky_begin - 1 : risky_begin;
-  const size_t local_end = std::min(segment_count - 1, risky_end + 1);
-  const size_t expanded_begin = local_begin > 0 ? local_begin - 1 : local_begin;
-  const size_t expanded_end = std::min(segment_count - 1, local_end + 1);
-
-  add_window(expanded_begin, expanded_end);
-  add_window(local_begin, local_end);
-  add_window(culprit_index, culprit_index);
+  std::stable_sort(candidate_windows.begin(), candidate_windows.end(),
+                   [](const RecoveryWindow& lhs, const RecoveryWindow& rhs) {
+                     const size_t lhs_span = lhs.end - lhs.begin;
+                     const size_t rhs_span = rhs.end - rhs.begin;
+                     if (lhs_span != rhs_span) {
+                       return lhs_span < rhs_span;
+                     }
+                     return lhs.hotspot.clearance < rhs.hotspot.clearance;
+                   });
+  if (candidate_windows.size() > 3) {
+    candidate_windows.resize(3);
+  }
 
   ROS_INFO(
-      "Local bottleneck rebuild: culprit_seg=%zu state=(%.3f, %.3f, %.3f) clearance=%.3f windows=%zu",
+      "Local bottleneck rebuild: culprit_seg=%zu state=(%.3f, %.3f, %.3f) clearance=%.3f hotspots=%zu windows=%zu timeout=%.1f per_window=%.1f",
       culprit_index, worst.state.x, worst.state.y, worst.state.yaw, worst.clearance,
-      candidate_windows.size());
+      hotspots.size(), candidate_windows.size(), recover_timeout_sec,
+      std::max(3.0, recover_timeout_sec /
+                        static_cast<double>(
+                            std::max<size_t>(1, std::min(candidate_windows.size(),
+                                                          hotspots.size() + 1)))));
 
   CandidateResult best;
   double best_length = kInf;
   bool found = false;
+  struct PartialRecoveryPatch {
+    size_t begin = 0;
+    size_t end = 0;
+    Trajectory replacement;
+    double local_clearance = -kInf;
+    int support_points = 0;
+    int high_risk_segments = 0;
+    int escalated_segments = 0;
+  };
+  std::vector<PartialRecoveryPatch> partial_patches;
   std::set<std::pair<size_t, size_t>> processed_windows;
+  size_t active_culprit_index = culprit_index;
+  ClearanceProbe active_hotspot = worst;
+  struct RecoveryDiagnostics {
+    int corridor_search_attempts = 0;
+    int corridor_search_successes = 0;
+    int corridor_topo_successes = 0;
+    int corridor_segment_successes = 0;
+    int direct_plan_attempts = 0;
+    int direct_plan_successes = 0;
+    int detour_plan_attempts = 0;
+    int detour_plan_successes = 0;
+    int single_patch_attempts = 0;
+    int single_patch_solver_failures = 0;
+    int single_patch_raw_infeasible = 0;
+    int single_patch_raw_feasible = 0;
+    int single_patch_local_infeasible = 0;
+    int single_patch_rebuilt_infeasible = 0;
+    int single_patch_successes = 0;
+    int segment_patch_attempts = 0;
+    int segment_patch_solver_failures = 0;
+    int segment_patch_middle_infeasible = 0;
+    int segment_patch_rebuilt_infeasible = 0;
+    int segment_patch_successes = 0;
+    double best_raw_clearance = -kInf;
+    double best_local_clearance = -kInf;
+    double best_rebuilt_clearance = -kInf;
+    std::string best_raw_label;
+    std::string best_local_label;
+    std::string best_rebuilt_label;
+  };
+  RecoveryDiagnostics current_diag;
+  auto note_best_clearance =
+      [&](double clearance, const char* label, const char* stage) {
+    if (!std::isfinite(clearance)) {
+      return;
+    }
+    if (std::strcmp(stage, "rebuilt") == 0) {
+      if (clearance > current_diag.best_rebuilt_clearance) {
+        current_diag.best_rebuilt_clearance = clearance;
+        current_diag.best_rebuilt_label = label;
+      }
+      return;
+    }
+    if (std::strcmp(stage, "raw") == 0) {
+      if (clearance > current_diag.best_raw_clearance) {
+        current_diag.best_raw_clearance = clearance;
+        current_diag.best_raw_label = label;
+      }
+      return;
+    }
+    if (clearance > current_diag.best_local_clearance) {
+      current_diag.best_local_clearance = clearance;
+      current_diag.best_local_label = label;
+    }
+  };
+  const double per_window_timeout_sec =
+      std::max(2.0, recover_timeout_sec /
+                        static_cast<double>(
+                            std::max<size_t>(1, candidate_windows.size())));
+  ros::WallTime current_window_start = recover_start;
+  auto recover_timed_out = [&]() {
+    const ros::WallDuration total_elapsed = ros::WallTime::now() - recover_start;
+    if (total_elapsed.toSec() > recover_timeout_sec) {
+      return true;
+    }
+    const ros::WallDuration window_elapsed = ros::WallTime::now() - current_window_start;
+    return window_elapsed.toSec() > per_window_timeout_sec;
+  };
 
   auto maybe_accept_patch =
       [&](size_t begin, size_t end, const std::vector<SE2State>& patch_waypoints,
           const char* label) {
+        if (recover_timed_out()) {
+          return;
+        }
         if (patch_waypoints.size() < 2) {
           return;
+        }
+        ++current_diag.single_patch_attempts;
+        const double raw_patch_clearance =
+            svsdf_evaluator_.segmentClearance(patch_waypoints, 0.10);
+        note_best_clearance(raw_patch_clearance, label, "raw");
+        if (std::isfinite(raw_patch_clearance) && raw_patch_clearance > -0.051) {
+          ++current_diag.single_patch_raw_feasible;
+        } else {
+          ++current_diag.single_patch_raw_infeasible;
         }
 
         Trajectory patch_traj;
@@ -1189,8 +1315,17 @@ bool SvsdfRuntime::TryRecoverBottleneck(
               patch_waypoints, 1.5 * EstimateSegmentTime(patch_waypoints));
         }
         if (patch_traj.empty()) {
+          ++current_diag.single_patch_solver_failures;
           return;
         }
+
+        double patch_clearance = -kInf;
+        if (!IsTrajectoryFeasible(patch_traj, &patch_clearance, nullptr, nullptr)) {
+          ++current_diag.single_patch_local_infeasible;
+          note_best_clearance(patch_clearance, label, "local");
+          return;
+        }
+        note_best_clearance(patch_clearance, label, "local");
 
         const Trajectory rebuilt =
             ConcatenateTrajectories(segment_trajectories, begin, end + 1, patch_traj);
@@ -1198,8 +1333,36 @@ bool SvsdfRuntime::TryRecoverBottleneck(
         double max_vel = 0.0;
         double max_acc = 0.0;
         if (!IsTrajectoryFeasible(rebuilt, &min_clearance, &max_vel, &max_acc)) {
+          ++current_diag.single_patch_rebuilt_infeasible;
+          note_best_clearance(min_clearance, label, "rebuilt");
+          PartialRecoveryPatch partial;
+          partial.begin = begin;
+          partial.end = end;
+          partial.replacement = patch_traj;
+          partial.local_clearance = patch_clearance;
+          partial.support_points = static_cast<int>(patch_waypoints.size());
+          partial.high_risk_segments = 1;
+          partial.escalated_segments = CountHighRiskSegments(segments, begin, end + 1);
+          bool replaced = false;
+          for (PartialRecoveryPatch& existing : partial_patches) {
+            if (existing.begin == partial.begin && existing.end == partial.end) {
+              if (partial.local_clearance > existing.local_clearance + 1e-3 ||
+                  (partial.local_clearance + 1e-3 >= existing.local_clearance &&
+                   partial.replacement.pos_pieces.size() <
+                       existing.replacement.pos_pieces.size())) {
+                existing = partial;
+              }
+              replaced = true;
+              break;
+            }
+          }
+          if (!replaced) {
+            partial_patches.push_back(partial);
+          }
           return;
         }
+        ++current_diag.single_patch_successes;
+        note_best_clearance(min_clearance, label, "rebuilt");
 
         const double rebuilt_length = ApproximateTrajectoryLength(rebuilt);
         const bool better_candidate =
@@ -1229,7 +1392,8 @@ bool SvsdfRuntime::TryRecoverBottleneck(
 
         ROS_INFO(
             "Local bottleneck rebuild accepted via %s: culprit_seg=%zu window=[%zu,%zu] clearance %.3f -> %.3f pieces %zu -> %zu",
-            label, culprit_index, begin, end, worst.clearance, min_clearance,
+            label, active_culprit_index, begin, end, active_hotspot.clearance,
+            min_clearance,
             current_traj.pos_pieces.size(), rebuilt.pos_pieces.size());
 
         best = candidate;
@@ -1240,14 +1404,21 @@ bool SvsdfRuntime::TryRecoverBottleneck(
   auto maybe_accept_segment_patch =
       [&](size_t begin, size_t end, const std::vector<MotionSegment>& patch_segments,
           const char* label) {
+        if (recover_timed_out()) {
+          return;
+        }
         if (patch_segments.empty()) {
           return;
         }
+        ++current_diag.segment_patch_attempts;
 
         std::vector<Trajectory> patch_segment_trajectories(patch_segments.size());
         std::vector<bool> escalated(patch_segments.size(), false);
         int escalated_segments = 0;
         for (size_t patch_index = 0; patch_index < patch_segments.size(); ++patch_index) {
+          if (recover_timed_out()) {
+            return;
+          }
           if (patch_segments[patch_index].waypoints.size() < 2) {
             return;
           }
@@ -1258,11 +1429,13 @@ bool SvsdfRuntime::TryRecoverBottleneck(
           if (patch_segments[patch_index].risk == RiskLevel::HIGH) {
             if (!SolveStrictSegment(patch_segments[patch_index].waypoints,
                                     &patch_segment_traj)) {
+              ++current_diag.segment_patch_solver_failures;
               return;
             }
           } else {
             if (!OptimizeLowRiskSegment(patch_segments[patch_index].waypoints, seg_time,
                                         &patch_segment_traj)) {
+              ++current_diag.segment_patch_solver_failures;
               return;
             }
             double segment_clearance = -kInf;
@@ -1270,6 +1443,7 @@ bool SvsdfRuntime::TryRecoverBottleneck(
                                       nullptr)) {
               if (!SolveStrictSegment(patch_segments[patch_index].waypoints,
                                       &patch_segment_traj)) {
+                ++current_diag.segment_patch_solver_failures;
                 return;
               }
               escalated[patch_index] = true;
@@ -1287,6 +1461,8 @@ bool SvsdfRuntime::TryRecoverBottleneck(
         double middle_clearance = -kInf;
         if (middle.empty() ||
             !IsTrajectoryFeasible(middle, &middle_clearance, nullptr, nullptr)) {
+          ++current_diag.segment_patch_middle_infeasible;
+          note_best_clearance(middle_clearance, label, "local");
           bool upgraded = false;
           for (size_t patch_index = 0; patch_index < patch_segments.size(); ++patch_index) {
             if (patch_segments[patch_index].risk == RiskLevel::LOW &&
@@ -1306,9 +1482,12 @@ bool SvsdfRuntime::TryRecoverBottleneck(
           middle = optimizer_.stitch(patch_segments, patch_segment_trajectories);
           if (middle.empty() ||
               !IsTrajectoryFeasible(middle, &middle_clearance, nullptr, nullptr)) {
+            ++current_diag.segment_patch_middle_infeasible;
+            note_best_clearance(middle_clearance, label, "local");
             return;
           }
         }
+        note_best_clearance(middle_clearance, label, "local");
 
         const Trajectory rebuilt =
             ConcatenateTrajectories(segment_trajectories, begin, end + 1, middle);
@@ -1316,8 +1495,38 @@ bool SvsdfRuntime::TryRecoverBottleneck(
         double max_vel = 0.0;
         double max_acc = 0.0;
         if (!IsTrajectoryFeasible(rebuilt, &min_clearance, &max_vel, &max_acc)) {
+          ++current_diag.segment_patch_rebuilt_infeasible;
+          note_best_clearance(min_clearance, label, "rebuilt");
+          PartialRecoveryPatch partial;
+          partial.begin = begin;
+          partial.end = end;
+          partial.replacement = middle;
+          partial.local_clearance = middle_clearance;
+          partial.support_points =
+              CountSupportPoints(patch_segments, 0, patch_segments.size());
+          partial.high_risk_segments =
+              CountHighRiskSegments(patch_segments, 0, patch_segments.size());
+          partial.escalated_segments = escalated_segments;
+          bool replaced = false;
+          for (PartialRecoveryPatch& existing : partial_patches) {
+            if (existing.begin == partial.begin && existing.end == partial.end) {
+              if (partial.local_clearance > existing.local_clearance + 1e-3 ||
+                  (partial.local_clearance + 1e-3 >= existing.local_clearance &&
+                   partial.replacement.pos_pieces.size() <
+                       existing.replacement.pos_pieces.size())) {
+                existing = partial;
+              }
+              replaced = true;
+              break;
+            }
+          }
+          if (!replaced) {
+            partial_patches.push_back(partial);
+          }
           return;
         }
+        ++current_diag.segment_patch_successes;
+        note_best_clearance(min_clearance, label, "rebuilt");
 
         const double rebuilt_length = ApproximateTrajectoryLength(rebuilt);
         const bool better_candidate =
@@ -1347,7 +1556,8 @@ bool SvsdfRuntime::TryRecoverBottleneck(
 
         ROS_INFO(
             "Local bottleneck rebuild accepted via %s: culprit_seg=%zu window=[%zu,%zu] clearance %.3f -> %.3f pieces %zu -> %zu",
-            label, culprit_index, begin, end, worst.clearance, min_clearance,
+            label, active_culprit_index, begin, end, active_hotspot.clearance,
+            min_clearance,
             current_traj.pos_pieces.size(), rebuilt.pos_pieces.size());
 
         best = candidate;
@@ -1355,13 +1565,45 @@ bool SvsdfRuntime::TryRecoverBottleneck(
         found = true;
       };
 
-  for (const auto& window : candidate_windows) {
-      if ((ros::WallTime::now() - recover_start).toSec() > kRecoverTimeoutSec) {
-        ROS_WARN("TryRecoverBottleneck timeout after %.1fs", kRecoverTimeoutSec);
+  auto log_window_diag = [&](size_t begin, size_t end) {
+    ROS_INFO(
+        "Local bottleneck diag window=[%zu,%zu] culprit_seg=%zu corridor=%d/%d topo=%d seg=%d direct=%d/%d detour=%d/%d single_patch=%d raw_ok=%d raw_fail=%d solve_fail=%d local_fail=%d rebuilt_fail=%d ok=%d seg_patch=%d solve_fail=%d middle_fail=%d rebuilt_fail=%d ok=%d best_raw=%.3f(%s) best_local=%.3f(%s) best_rebuilt=%.3f(%s)",
+        begin, end, active_culprit_index, current_diag.corridor_search_successes,
+        current_diag.corridor_search_attempts, current_diag.corridor_topo_successes,
+        current_diag.corridor_segment_successes, current_diag.direct_plan_successes,
+        current_diag.direct_plan_attempts, current_diag.detour_plan_successes,
+        current_diag.detour_plan_attempts, current_diag.single_patch_attempts,
+        current_diag.single_patch_raw_feasible,
+        current_diag.single_patch_raw_infeasible,
+        current_diag.single_patch_solver_failures,
+        current_diag.single_patch_local_infeasible,
+        current_diag.single_patch_rebuilt_infeasible,
+        current_diag.single_patch_successes, current_diag.segment_patch_attempts,
+        current_diag.segment_patch_solver_failures,
+        current_diag.segment_patch_middle_infeasible,
+        current_diag.segment_patch_rebuilt_infeasible,
+        current_diag.segment_patch_successes, current_diag.best_raw_clearance,
+        current_diag.best_raw_label.empty() ? "-" :
+                                             current_diag.best_raw_label.c_str(),
+        current_diag.best_local_clearance,
+        current_diag.best_local_label.empty() ? "-" :
+                                               current_diag.best_local_label.c_str(),
+        current_diag.best_rebuilt_clearance,
+        current_diag.best_rebuilt_label.empty() ? "-" :
+                                                 current_diag.best_rebuilt_label.c_str());
+  };
+
+  for (const RecoveryWindow& window : candidate_windows) {
+      if ((ros::WallTime::now() - recover_start).toSec() > recover_timeout_sec) {
+        ROS_WARN("TryRecoverBottleneck timeout after %.1fs", recover_timeout_sec);
         break;
       }
-      size_t begin = window.first;
-      size_t end = window.second;
+      current_window_start = ros::WallTime::now();
+      current_diag = RecoveryDiagnostics();
+      active_culprit_index = window.culprit_index;
+      active_hotspot = window.hotspot;
+      size_t begin = window.begin;
+      size_t end = window.end;
 
       while (begin > 0 &&
              (!std::isfinite(svsdf_evaluator_.evaluate(segments[begin].waypoints.front())) ||
@@ -1390,19 +1632,6 @@ bool SvsdfRuntime::TryRecoverBottleneck(
         continue;
       }
 
-      TopologyPlanner local_topology_planner;
-      const int local_topology_samples =
-          std::max(1200, std::min(4000, topology_num_samples_ / 4));
-      const int local_topology_knn =
-          std::max(12, std::min(24, topology_knn_));
-      const int local_topology_paths =
-          std::max(6, std::min(12, topology_max_paths_));
-      const double local_inscribed_radius =
-          footprint_.inscribedRadius() + grid_map_.resolution();
-      local_topology_planner.init(grid_map_, collision_checker_, local_topology_samples,
-                                  local_topology_knn, local_topology_paths,
-                                  local_inscribed_radius);
-      local_topology_planner.buildRoadmap(start_anchor.position(), goal_anchor.position());
       const std::pair<double, double> corridor_window =
           SegmentTimeWindow(segment_trajectories, begin, end);
       const double corridor_block_threshold =
@@ -1414,55 +1643,65 @@ bool SvsdfRuntime::TryRecoverBottleneck(
           corridor_window.second + 0.20, corridor_block_threshold,
           corridor_sample_spacing);
       if (blocked_centers.empty()) {
-        blocked_centers.push_back(worst.state.position());
+        blocked_centers.push_back(active_hotspot.state.position());
       }
 
       ROS_INFO(
-          "Local bottleneck rebuild window=[%zu,%zu] anchors=(%.3f, %.3f)->(%.3f, %.3f) blocked_centers=%zu",
-          begin, end, start_anchor.x, start_anchor.y, goal_anchor.x, goal_anchor.y,
-          blocked_centers.size());
+          "Local bottleneck rebuild window=[%zu,%zu] culprit_seg=%zu anchors=(%.3f, %.3f)->(%.3f, %.3f) blocked_centers=%zu",
+          begin, end, active_culprit_index, start_anchor.x, start_anchor.y,
+          goal_anchor.x, goal_anchor.y, blocked_centers.size());
+
+      const bool precise_window = (begin == end && end == active_culprit_index);
 
       const double hotspot_radius_base =
           std::max(1.00, 3.0 * footprint_.circumscribedRadius());
-      const double hotspot_radius_scales[] = {1.0, 1.5, 2.0};
+      std::vector<double> hotspot_radius_scales;
+      hotspot_radius_scales.push_back(1.0);
+      if (precise_window) {
+        hotspot_radius_scales.insert(hotspot_radius_scales.begin(), 0.45);
+        hotspot_radius_scales.insert(hotspot_radius_scales.begin() + 1, 0.70);
+        hotspot_radius_scales.push_back(1.5);
+        hotspot_radius_scales.push_back(2.0);
+      }
       for (double radius_scale : hotspot_radius_scales) {
-        const double hotspot_radius = hotspot_radius_base * radius_scale;
-        std::vector<TopoPath> local_paths =
-            local_topology_planner.searchPathsAvoidingCenters(blocked_centers,
-                                                              hotspot_radius);
-        const size_t max_local_paths = std::min<size_t>(3, local_paths.size());
-        for (size_t path_idx = 0; path_idx < max_local_paths; ++path_idx) {
-          const std::vector<MotionSegment> local_segments =
-              se2_generator_.generate(local_paths[path_idx], start_anchor, goal_anchor);
-          if (local_segments.empty()) {
-            continue;
-          }
-          const std::string label =
-              "local_topology_r" + std::to_string(hotspot_radius);
-          maybe_accept_segment_patch(begin, end, local_segments, label.c_str());
+        if (recover_timed_out()) {
+          break;
         }
-
+        const double hotspot_radius = hotspot_radius_base * radius_scale;
         const double clearance_base =
             std::max(anchor_clearance_threshold,
                      footprint_.inscribedRadius() + grid_map_.resolution());
-        const double clearance_candidates[] = {
-            std::max(clearance_base, 0.5 * footprint_.circumscribedRadius()),
-            clearance_base,
-            std::max(0.08, optimizer_params_.safety_margin)};
-        const int min_safe_yaw_candidates[] = {4, 2, 1};
+        std::vector<double> clearance_candidates;
+        clearance_candidates.push_back(
+            std::max(clearance_base, 0.5 * footprint_.circumscribedRadius()));
+        if (precise_window) {
+          clearance_candidates.push_back(clearance_base);
+          clearance_candidates.push_back(std::max(0.08, optimizer_params_.safety_margin));
+        }
+        std::vector<int> min_safe_yaw_candidates;
+        min_safe_yaw_candidates.push_back(4);
+        if (precise_window) {
+          min_safe_yaw_candidates.push_back(2);
+          min_safe_yaw_candidates.push_back(1);
+        }
         for (double corridor_clearance : clearance_candidates) {
+          if (recover_timed_out()) {
+            break;
+          }
           SweptAstar corridor_astar;
           corridor_astar.init(grid_map_, collision_checker_, corridor_clearance);
 
           Eigen::Vector2d min_corner = start_anchor.position().cwiseMin(goal_anchor.position());
           Eigen::Vector2d max_corner = start_anchor.position().cwiseMax(goal_anchor.position());
-          min_corner = min_corner.cwiseMin(worst.state.position());
-          max_corner = max_corner.cwiseMax(worst.state.position());
+          min_corner = min_corner.cwiseMin(active_hotspot.state.position());
+          max_corner = max_corner.cwiseMax(active_hotspot.state.position());
           for (const Eigen::Vector2d& center : blocked_centers) {
             min_corner = min_corner.cwiseMin(center);
             max_corner = max_corner.cwiseMax(center);
           }
-          const double search_padding = std::max(2.0, 1.5 * hotspot_radius);
+          const double search_padding =
+              precise_window ? std::max(3.0, 2.0 * hotspot_radius)
+                             : std::max(2.0, 1.5 * hotspot_radius);
           min_corner.array() -= search_padding;
           max_corner.array() += search_padding;
           GridIndex min_index = grid_map_.worldToGrid(min_corner.x(), min_corner.y());
@@ -1480,13 +1719,18 @@ bool SvsdfRuntime::TryRecoverBottleneck(
           options.blocked_center_penalty = 1.0;
 
           for (int min_safe_yaw_count : min_safe_yaw_candidates) {
+            if (recover_timed_out()) {
+              break;
+            }
             options.min_safe_yaw_count = min_safe_yaw_count;
+            ++current_diag.corridor_search_attempts;
             const AstarSearchResult corridor_result =
                 corridor_astar.search(start_anchor.position(), goal_anchor.position(),
                                       options);
             if (!corridor_result.success || corridor_result.path.size() < 2) {
               continue;
             }
+            ++current_diag.corridor_search_successes;
 
             const TopoPath corridor_topo = BuildTopoPathFromCorridor(
                 corridor_result.path, grid_map_, collision_checker_, corridor_clearance,
@@ -1494,12 +1738,14 @@ bool SvsdfRuntime::TryRecoverBottleneck(
             if (corridor_topo.waypoints.size() < 2) {
               continue;
             }
+            ++current_diag.corridor_topo_successes;
 
             const std::vector<MotionSegment> corridor_segments =
                 se2_generator_.generate(corridor_topo, start_anchor, goal_anchor);
             if (corridor_segments.empty()) {
               continue;
             }
+            ++current_diag.corridor_segment_successes;
             const std::string label =
                 "local_corridor_astar_r" + std::to_string(hotspot_radius) +
                 "_c" + std::to_string(corridor_clearance) +
@@ -1510,10 +1756,16 @@ bool SvsdfRuntime::TryRecoverBottleneck(
       }
 
       std::vector<SE2State> patch_waypoints;
-      if (!hybrid_astar_.plan(start_anchor, goal_anchor, patch_waypoints) ||
-          patch_waypoints.size() < 2) {
+      if (recover_timed_out()) {
         continue;
       }
+      ++current_diag.direct_plan_attempts;
+      if (!hybrid_astar_.plan(start_anchor, goal_anchor, patch_waypoints) ||
+          patch_waypoints.size() < 2) {
+        log_window_diag(begin, end);
+        continue;
+      }
+      ++current_diag.direct_plan_successes;
 
       const SE2State patch_start = patch_waypoints.front();
       const SE2State patch_goal = patch_waypoints.back();
@@ -1525,6 +1777,7 @@ bool SvsdfRuntime::TryRecoverBottleneck(
               endpoint_pos_tolerance ||
           std::abs(normalizeAngle(patch_goal.yaw - goal_anchor.yaw)) >
               endpoint_yaw_tolerance) {
+        log_window_diag(begin, end);
         continue;
       }
 
@@ -1532,17 +1785,32 @@ bool SvsdfRuntime::TryRecoverBottleneck(
       patch_waypoints.back() = goal_anchor;
       maybe_accept_patch(begin, end, patch_waypoints, "direct_hastar");
 
-      const Eigen::Vector2d lateral(-std::sin(worst.state.yaw), std::cos(worst.state.yaw));
-      const double detour_offsets[] = {0.60, 1.00, 1.40, 1.80};
+      const Eigen::Vector2d lateral(-std::sin(active_hotspot.state.yaw),
+                                    std::cos(active_hotspot.state.yaw));
+      std::vector<double> detour_offsets;
+      detour_offsets.push_back(1.00);
+      if (precise_window) {
+        detour_offsets.push_back(0.60);
+        detour_offsets.push_back(1.40);
+        detour_offsets.push_back(1.80);
+      }
       for (int side : {-1, 1}) {
+        if (recover_timed_out()) {
+          break;
+        }
         for (double offset : detour_offsets) {
+          if (recover_timed_out()) {
+            break;
+          }
+          ++current_diag.detour_plan_attempts;
           const Eigen::Vector2d via_pos =
-              worst.state.position() + static_cast<double>(side) * offset * lateral;
+              active_hotspot.state.position() +
+              static_cast<double>(side) * offset * lateral;
           if (grid_map_.getEsdf(via_pos.x(), via_pos.y()) < 0.10) {
             continue;
           }
 
-          const SE2State via_state(via_pos.x(), via_pos.y(), worst.state.yaw);
+          const SE2State via_state(via_pos.x(), via_pos.y(), active_hotspot.state.yaw);
           std::vector<SE2State> first_leg;
           if (!hybrid_astar_.plan(start_anchor, via_state, first_leg) ||
               first_leg.size() < 2) {
@@ -1555,6 +1823,7 @@ bool SvsdfRuntime::TryRecoverBottleneck(
               second_leg.size() < 2) {
             continue;
           }
+          ++current_diag.detour_plan_successes;
 
           if ((first_leg.front().position() - start_anchor.position()).norm() >
                   endpoint_pos_tolerance ||
@@ -1576,7 +1845,90 @@ bool SvsdfRuntime::TryRecoverBottleneck(
                              side < 0 ? "detour_right" : "detour_left");
         }
       }
+      log_window_diag(begin, end);
       if (found) break;
+  }
+
+  if (!found && !partial_patches.empty()) {
+    std::stable_sort(
+        partial_patches.begin(), partial_patches.end(),
+        [](const PartialRecoveryPatch& lhs, const PartialRecoveryPatch& rhs) {
+          if (lhs.local_clearance != rhs.local_clearance) {
+            return lhs.local_clearance > rhs.local_clearance;
+          }
+          const size_t lhs_span = lhs.end - lhs.begin;
+          const size_t rhs_span = rhs.end - rhs.begin;
+          if (lhs_span != rhs_span) {
+            return lhs_span > rhs_span;
+          }
+          return lhs.replacement.pos_pieces.size() < rhs.replacement.pos_pieces.size();
+        });
+
+    std::vector<PartialRecoveryPatch> selected_patches;
+    for (const PartialRecoveryPatch& patch : partial_patches) {
+      bool overlaps = false;
+      for (const PartialRecoveryPatch& selected : selected_patches) {
+        if (!(patch.end < selected.begin || selected.end < patch.begin)) {
+          overlaps = true;
+          break;
+        }
+      }
+      if (!overlaps) {
+        selected_patches.push_back(patch);
+      }
+    }
+
+    std::sort(selected_patches.begin(), selected_patches.end(),
+              [](const PartialRecoveryPatch& lhs, const PartialRecoveryPatch& rhs) {
+                return lhs.begin < rhs.begin;
+              });
+
+    Trajectory rebuilt;
+    size_t segment_cursor = 0;
+    int rebuilt_support_points = 0;
+    int rebuilt_high_risk_segments = 0;
+    int rebuilt_escalated_segments = 0;
+    for (const PartialRecoveryPatch& patch : selected_patches) {
+      for (size_t i = segment_cursor; i < patch.begin && i < segment_trajectories.size(); ++i) {
+        AppendTrajectoryPieces(segment_trajectories[i], &rebuilt);
+      }
+      AppendTrajectoryPieces(patch.replacement, &rebuilt);
+      rebuilt_support_points += CountSupportPoints(segments, segment_cursor, patch.begin);
+      rebuilt_high_risk_segments +=
+          CountHighRiskSegments(segments, segment_cursor, patch.begin);
+      rebuilt_support_points += patch.support_points;
+      rebuilt_high_risk_segments += patch.high_risk_segments;
+      rebuilt_escalated_segments =
+          std::max(rebuilt_escalated_segments, patch.escalated_segments);
+      segment_cursor = patch.end + 1;
+    }
+    for (size_t i = segment_cursor; i < segment_trajectories.size(); ++i) {
+      AppendTrajectoryPieces(segment_trajectories[i], &rebuilt);
+    }
+    rebuilt_support_points += CountSupportPoints(segments, segment_cursor, segment_count);
+    rebuilt_high_risk_segments +=
+        CountHighRiskSegments(segments, segment_cursor, segment_count);
+
+    double min_clearance = -kInf;
+    double max_vel = 0.0;
+    double max_acc = 0.0;
+    if (!rebuilt.empty() &&
+        IsTrajectoryFeasible(rebuilt, &min_clearance, &max_vel, &max_acc)) {
+      ROS_INFO(
+          "Local bottleneck rebuild accepted via multi_window_combine: patches=%zu clearance %.3f -> %.3f pieces %zu -> %zu",
+          selected_patches.size(), worst.clearance, min_clearance,
+          current_traj.pos_pieces.size(), rebuilt.pos_pieces.size());
+      best = *result;
+      best.trajectory = rebuilt;
+      best.min_clearance = min_clearance;
+      best.max_vel = max_vel;
+      best.max_acc = max_acc;
+      best.support_points = rebuilt_support_points;
+      best.high_risk_segments = rebuilt_high_risk_segments;
+      best.escalated_segments =
+          std::max(best.escalated_segments, rebuilt_escalated_segments);
+      found = true;
+    }
   }
 
   if (!found) {
@@ -1596,63 +1948,85 @@ bool SvsdfRuntime::SolveStrictSegment(const std::vector<SE2State>& waypoints,
   if (trajectory == nullptr) {
     return false;
   }
-  std::vector<SE2State> sparse_waypoints = SparsifyStrictWaypoints(waypoints, grid_map_);
-  ROS_INFO("Runtime stage: strict SE(2) input sparsified from %zu to %zu points",
-           waypoints.size(), sparse_waypoints.size());
+  const double raw_clearance = svsdf_evaluator_.segmentClearance(waypoints, 0.10);
+  const bool preserve_dense_input =
+      std::isfinite(raw_clearance) && raw_clearance > -0.051;
+  std::vector<SE2State> sparse_waypoints =
+      preserve_dense_input ? waypoints : SparsifyStrictWaypoints(waypoints, grid_map_);
+  ROS_INFO(
+      "Runtime stage: strict SE(2) input %s from %zu to %zu points (raw_clearance=%.3f)",
+      preserve_dense_input ? "preserved" : "sparsified", waypoints.size(),
+      sparse_waypoints.size(), raw_clearance);
 
   // Push interior waypoints away from obstacles along ESDF gradient
   const double push_margin = 0.40;
   const double push_step = 0.10;
   const int max_push_iters = 15;
   const double h = grid_map_.resolution();
-  for (size_t i = 1; i + 1 < sparse_waypoints.size(); ++i) {
-    for (int iter = 0; iter < max_push_iters; ++iter) {
-      const double esdf = grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y);
-      if (std::isfinite(esdf) && esdf >= push_margin) break;
+  if (!preserve_dense_input) {
+    for (size_t i = 1; i + 1 < sparse_waypoints.size(); ++i) {
+      for (int iter = 0; iter < max_push_iters; ++iter) {
+        const double esdf = grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y);
+        if (std::isfinite(esdf) && esdf >= push_margin) break;
 
-      // Compute ESDF gradient via finite difference
-      const double dEdx = (grid_map_.getEsdf(sparse_waypoints[i].x + h, sparse_waypoints[i].y)
-                         - grid_map_.getEsdf(sparse_waypoints[i].x - h, sparse_waypoints[i].y)) / (2.0 * h);
-      const double dEdy = (grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y + h)
-                         - grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y - h)) / (2.0 * h);
-      const double grad_norm = std::sqrt(dEdx * dEdx + dEdy * dEdy);
+        // Compute ESDF gradient via finite difference
+        const double dEdx = (grid_map_.getEsdf(sparse_waypoints[i].x + h, sparse_waypoints[i].y)
+                           - grid_map_.getEsdf(sparse_waypoints[i].x - h, sparse_waypoints[i].y)) / (2.0 * h);
+        const double dEdy = (grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y + h)
+                           - grid_map_.getEsdf(sparse_waypoints[i].x, sparse_waypoints[i].y - h)) / (2.0 * h);
+        const double grad_norm = std::sqrt(dEdx * dEdx + dEdy * dEdy);
 
-      if (grad_norm > 1e-6) {
-        // Push along gradient (toward higher ESDF)
-        sparse_waypoints[i].x += push_step * dEdx / grad_norm;
-        sparse_waypoints[i].y += push_step * dEdy / grad_norm;
-      } else {
-        // Gradient is zero (deep inside obstacle) — radial search for nearest free cell
-        bool found_free = false;
-        for (double radius = h; radius <= 2.0; radius += h) {
-          double best_esdf = -1.0;
-          double best_dx = 0, best_dy = 0;
-          for (int a = 0; a < 16; ++a) {
-            const double angle = a * M_PI / 8.0;
-            const double dx = radius * std::cos(angle);
-            const double dy = radius * std::sin(angle);
-            const double e = grid_map_.getEsdf(sparse_waypoints[i].x + dx,
-                                                sparse_waypoints[i].y + dy);
-            if (std::isfinite(e) && e > best_esdf) {
-              best_esdf = e;
-              best_dx = dx;
-              best_dy = dy;
+        if (grad_norm > 1e-6) {
+          // Push along gradient (toward higher ESDF)
+          sparse_waypoints[i].x += push_step * dEdx / grad_norm;
+          sparse_waypoints[i].y += push_step * dEdy / grad_norm;
+        } else {
+          // Gradient is zero (deep inside obstacle) — radial search for nearest free cell
+          bool found_free = false;
+          for (double radius = h; radius <= 2.0; radius += h) {
+            double best_esdf = -1.0;
+            double best_dx = 0, best_dy = 0;
+            for (int a = 0; a < 16; ++a) {
+              const double angle = a * M_PI / 8.0;
+              const double dx = radius * std::cos(angle);
+              const double dy = radius * std::sin(angle);
+              const double e = grid_map_.getEsdf(sparse_waypoints[i].x + dx,
+                                                  sparse_waypoints[i].y + dy);
+              if (std::isfinite(e) && e > best_esdf) {
+                best_esdf = e;
+                best_dx = dx;
+                best_dy = dy;
+              }
+            }
+            if (best_esdf > push_margin) {
+              sparse_waypoints[i].x += best_dx;
+              sparse_waypoints[i].y += best_dy;
+              found_free = true;
+              break;
             }
           }
-          if (best_esdf > push_margin) {
-            sparse_waypoints[i].x += best_dx;
-            sparse_waypoints[i].y += best_dy;
-            found_free = true;
-            break;
-          }
+          if (!found_free) break;
         }
-        if (!found_free) break;
       }
     }
   }
 
-  return strict_solver_.ready() &&
-         strict_solver_.Solve(sparse_waypoints, trajectory);
+  if (!strict_solver_.ready() ||
+      !strict_solver_.Solve(sparse_waypoints, trajectory, preserve_dense_input) ||
+      trajectory->empty()) {
+    return false;
+  }
+
+  if (preserve_dense_input) {
+    double solved_clearance = -kInf;
+    if (!IsTrajectoryFeasible(*trajectory, &solved_clearance, nullptr, nullptr)) {
+      ROS_WARN(
+          "Strict SE(2) solver degraded a feasible waypoint chain: raw_clearance=%.3f solved_clearance=%.3f",
+          raw_clearance, solved_clearance);
+    }
+  }
+
+  return true;
 }
 
 bool SvsdfRuntime::OptimizeLowRiskSegment(const std::vector<SE2State>& waypoints,
