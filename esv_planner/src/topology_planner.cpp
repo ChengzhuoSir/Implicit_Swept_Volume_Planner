@@ -1,4 +1,5 @@
 #include "esv_planner/topology_planner.h"
+#include "esv_planner/nanoflann.hpp"
 
 #include <ros/ros.h>
 #include <algorithm>
@@ -12,6 +13,37 @@
 #include <unordered_set>
 
 namespace esv_planner {
+
+// KD-tree wrapper (pimpl to isolate nanoflann from headers with PI macro)
+struct PointCloud2D {
+  const std::vector<Eigen::Vector2d>* pts = nullptr;
+  size_t kdtree_get_point_count() const { return pts ? pts->size() : 0; }
+  double kdtree_get_pt(size_t idx, size_t dim) const { return (*pts)[idx](dim); }
+  template <class B> bool kdtree_get_bbox(B&) const { return false; }
+};
+
+using KDTree2D = nanoflann::KDTreeSingleIndexAdaptor<
+    nanoflann::L2_Simple_Adaptor<double, PointCloud2D>, PointCloud2D, 2>;
+
+struct KDTreeWrapper {
+  PointCloud2D cloud;
+  std::unique_ptr<KDTree2D> tree;
+
+  void build(const std::vector<Eigen::Vector2d>& nodes) {
+    cloud.pts = &nodes;
+    tree = std::make_unique<KDTree2D>(2, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+    tree->buildIndex();
+  }
+
+  // Returns number of results found; fills out_indices and out_dists (squared distances)
+  size_t knnSearch(const double* query, size_t k,
+                   std::vector<unsigned int>& out_indices,
+                   std::vector<double>& out_dists) const {
+    out_indices.resize(k);
+    out_dists.resize(k);
+    return tree->knnSearch(query, k, out_indices.data(), out_dists.data());
+  }
+};
 
 namespace {
 
@@ -194,7 +226,7 @@ bool ShouldPreserveWaypoint(const TopoWaypoint& waypoint, const GridMap& map,
     return true;
   }
   return static_cast<int>(
-             checker.safeYawIndices(waypoint.pos.x(), waypoint.pos.y()).size()) <
+             checker.safeYawCount(waypoint.pos.x(), waypoint.pos.y())) <
          min_safe_yaw_count;
 }
 
@@ -260,6 +292,8 @@ std::pair<double, std::vector<int>> DijkstraFull(
 
 TopologyPlanner::TopologyPlanner() {}
 
+TopologyPlanner::~TopologyPlanner() = default;
+
 void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker, int num_samples,
                            int knn, int max_paths, double inscribed_radius) {
   const bool params_changed =
@@ -308,33 +342,33 @@ void TopologyPlanner::rebuildBaseRoadmap() {
     const double y = y_min + HaltonSequence(i, 3) * (y_max - y_min);
     const double node_clearance = inscribed_radius_ + map_->resolution();
     if (map_->getEsdf(x, y) > node_clearance &&
-        !checker_->safeYawIndices(x, y).empty()) {
+        checker_->hasAnySafeYaw(x, y)) {
       base_nodes_.push_back(Eigen::Vector2d(x, y));
       ++accepted;
     }
   }
 
   base_adjacency_.assign(base_nodes_.size(), std::vector<std::pair<int, double>>());
+
+  // Build KD-tree for fast KNN
+  kdtree_ = std::make_unique<KDTreeWrapper>();
+  kdtree_->build(base_nodes_);
+
+  const size_t search_k = static_cast<size_t>(knn_ * 3);
+  std::vector<unsigned int> indices;
+  std::vector<double> dists;
   int total_edges = 0;
   for (size_t i = 0; i < base_nodes_.size(); ++i) {
-    std::vector<std::pair<double, int>> distances;
-    distances.reserve(base_nodes_.size());
-    for (size_t j = 0; j < base_nodes_.size(); ++j) {
-      if (i == j) {
-        continue;
-      }
-      distances.push_back(
-          std::make_pair((base_nodes_[i] - base_nodes_[j]).norm(), static_cast<int>(j)));
-    }
-    std::sort(distances.begin(), distances.end());
+    const double query[2] = {base_nodes_[i].x(), base_nodes_[i].y()};
+    const size_t found = kdtree_->knnSearch(query, search_k, indices, dists);
 
     int connections = 0;
-    for (const auto& item : distances) {
-      if (connections >= knn_) {
-        break;
-      }
-      if (lineCollisionFree(base_nodes_[i], base_nodes_[static_cast<size_t>(item.second)])) {
-        base_adjacency_[i].push_back(std::make_pair(item.second, item.first));
+    for (size_t m = 0; m < found && connections < knn_; ++m) {
+      const size_t j = indices[m];
+      if (j == i) continue;
+      const double dist = std::sqrt(dists[m]);
+      if (lineCollisionFree(base_nodes_[i], base_nodes_[j])) {
+        base_adjacency_[i].push_back(std::make_pair(static_cast<int>(j), dist));
         ++connections;
         ++total_edges;
       }
@@ -367,28 +401,26 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
   }
 
   const auto connect_special_node = [&](int special_index) {
-    std::vector<std::pair<double, int>> distances;
-    distances.reserve(base_nodes_.size());
-    for (size_t j = 0; j < base_nodes_.size(); ++j) {
-      distances.push_back(
-          std::make_pair((nodes_[static_cast<size_t>(special_index)] - base_nodes_[j]).norm(),
-                         static_cast<int>(j + 2)));
-    }
-    std::sort(distances.begin(), distances.end());
+    const double query[2] = {nodes_[static_cast<size_t>(special_index)].x(),
+                             nodes_[static_cast<size_t>(special_index)].y()};
+    const size_t search_k = static_cast<size_t>(knn_ * 3);
+    std::vector<unsigned int> knn_indices;
+    std::vector<double> knn_dists;
+    const size_t found = kdtree_->knnSearch(query, search_k, knn_indices, knn_dists);
 
     int connections = 0;
-    for (const auto& item : distances) {
-      if (connections >= knn_) {
-        break;
-      }
+    for (size_t m = 0; m < found && connections < knn_; ++m) {
+      const size_t j = knn_indices[m];
+      const int node_index = static_cast<int>(j + 2);
+      const double dist = std::sqrt(knn_dists[m]);
       if (!lineCollisionFree(nodes_[static_cast<size_t>(special_index)],
-                             nodes_[static_cast<size_t>(item.second)])) {
+                             nodes_[static_cast<size_t>(node_index)])) {
         continue;
       }
       adjacency_[static_cast<size_t>(special_index)].push_back(
-          std::make_pair(item.second, item.first));
-      adjacency_[static_cast<size_t>(item.second)].push_back(
-          std::make_pair(special_index, item.first));
+          std::make_pair(node_index, dist));
+      adjacency_[static_cast<size_t>(node_index)].push_back(
+          std::make_pair(special_index, dist));
       total_edges += 2;
       ++connections;
     }
@@ -611,7 +643,7 @@ bool TopologyPlanner::lineCollisionFree(const Eigen::Vector2d& a, const Eigen::V
     }
   }
   const Eigen::Vector2d midpoint = 0.5 * (a + b);
-  if (checker_->safeYawIndices(midpoint.x(), midpoint.y()).empty()) {
+  if (!checker_->hasAnySafeYaw(midpoint.x(), midpoint.y())) {
     return false;
   }
   return true;
@@ -875,7 +907,7 @@ bool TopologyPlanner::isTopologicallyDistinct(
         const double t = static_cast<double>(s) / static_cast<double>(checks);
         const Eigen::Vector2d point = p1 + t * (p2 - p1);
         if (map_->getEsdf(point.x(), point.y()) < clearance_margin ||
-            checker_->safeYawIndices(point.x(), point.y()).empty()) {
+            !checker_->hasAnySafeYaw(point.x(), point.y())) {
           equivalent = false;
           break;
         }

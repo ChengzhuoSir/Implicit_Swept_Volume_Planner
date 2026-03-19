@@ -564,10 +564,10 @@ public:
                                           Eigen::MatrixX3d &gradC)
     {
         TrajOptimizer &obj = *(TrajOptimizer *)ptr;
-        const double velSqrMax = obj.vmax   * obj.vmax;  
-        const double omgSqrMax = obj.omgmax * obj.omgmax ; 
-        const double thetaMax  = obj.thetamax;                      
-        const double weightVel = obj.weight_v;    
+        const double velSqrMax = obj.vmax   * obj.vmax;
+        const double omgSqrMax = obj.omgmax * obj.omgmax ;
+        const double thetaMax  = obj.thetamax;
+        const double weightVel = obj.weight_v;
         const double weightPos = obj.weight_p;
         const double weightOmg = obj.weight_omg;
         const double weightTheta = obj.weight_theta;
@@ -577,13 +577,22 @@ public:
         const double integralFrac = 1.0 / integralResolution;
 
         pos_cost = 0;
-        #pragma omp parallel for num_threads(obj.threads_num) schedule(dynamic)
+
+        const int num_threads = obj.threads_num;
+        std::vector<Eigen::MatrixX3d> tl_gradC(num_threads,
+            Eigen::MatrixX3d::Zero(gradC.rows(), 3));
+        std::vector<Eigen::VectorXd> tl_gradT(num_threads,
+            Eigen::VectorXd::Zero(gradT.size()));
+        std::vector<double> tl_cost(num_threads, 0.0);
+
+        #pragma omp parallel for num_threads(num_threads) schedule(dynamic)
         for (int count = 0; count < pieceNum * (integralResolution + 1); count++)
         {
+            int tid = omp_get_thread_num();
             int j = count % (integralResolution + 1);
             int i = count / (integralResolution + 1);
             const Eigen::Matrix<double, 6, 3> &c = coeffs.block<6, 3>(i * 6, 0);
-            double step = T(i) * integralFrac;            
+            double step = T(i) * integralFrac;
             double s1 = j * step;
             double s2 = s1 * s1;
             double s3 = s2 * s1;
@@ -601,7 +610,7 @@ public:
             Eigen::Vector3d jer = c.transpose() * beta3;
             Eigen::Vector3d sna = c.transpose() * beta4;
             double omg = vel(2);
-            Eigen::Matrix3d St     = obj.sv_manager -> getScale(s1); 
+            Eigen::Matrix3d St     = obj.sv_manager -> getScale(s1);
             double pena   = 0.0;
             Eigen::Vector3d gradVel, gradAcc, gradPos, gradOmg;
             Eigen::Vector4d gradQuat;
@@ -619,24 +628,26 @@ public:
             double node = (j == 0 || j == integralResolution) ? 0.5 : 1.0;
             double alpha = j * integralFrac;
 
-
-            #pragma omp critical
-            {
-            gradC.block<6, 3>(i * 6, 0) += (beta0 * gradPosTotal.transpose() +
+            tl_gradC[tid].block<6, 3>(i * 6, 0) += (beta0 * gradPosTotal.transpose() +
                                             beta1 * gradVelTotal.transpose() +
                                             beta2 * gradAccTotal.transpose() +
                                             beta3 * gradJerTotal.transpose()) *
                                            node * step;
 
-            gradT(i) += (gradPosTotal.dot(vel) +
+            tl_gradT[tid](i) += (gradPosTotal.dot(vel) +
                         gradVelTotal.dot(acc) +
                         gradAccTotal.dot(jer) +
                         gradJerTotal.dot(sna)) *
                             alpha * node * step +
                         node * integralFrac * pena;
 
-            cost += node * step * pena;
-            }
+            tl_cost[tid] += node * step * pena;
+        }
+
+        for (int t = 0; t < num_threads; ++t) {
+            gradC += tl_gradC[t];
+            gradT += tl_gradT[t];
+            cost += tl_cost[t];
         }
         return;
     }
@@ -805,21 +816,29 @@ public:
         const double weightPos = obj.weight_p;
         const double neighbor_dis = 2 * obj.conf.occupancy_resolution;
         const int pieceNum = T.size();
-#pragma omp parallel for num_threads(obj.threads_num) schedule(dynamic)
+
+        const int num_threads = obj.threads_num;
+        std::vector<Eigen::MatrixX3d> tl_gradC(num_threads,
+            Eigen::MatrixX3d::Zero(gradC.rows(), 3));
+        std::vector<Eigen::VectorXd> tl_gradT(num_threads,
+            Eigen::VectorXd::Zero(gradT.size()));
+        std::vector<double> tl_cost(num_threads, 0.0);
+        std::vector<double> tl_ori_cost_pos(num_threads, 0.0);
+
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic)
         for(int pointindex = 0; pointindex < obj.parallel_points_num; ++pointindex)
         {
-            // int thread_num = omp_get_thread_num();
-            // printf("Thread number: %d\n", thread_num);
-            Eigen::Vector3d pos_eva = obj.parallel_points[pointindex]; 
+            int tid = omp_get_thread_num();
+            Eigen::Vector3d pos_eva = obj.parallel_points[pointindex];
             pos_eva(2) = 0;
             Eigen::Vector3d gradp_rel;
             double time_star;
-            double sdf_value      = obj.sv_manager -> getTrueSDFofSweptVolume<true>(pos_eva, time_star, gradp_rel, false);  
+            double sdf_value      = obj.sv_manager -> getTrueSDFofSweptVolume<true>(pos_eva, time_star, gradp_rel, false);
             double time_seed_f = time_star;
             double time_local  = time_seed_f;
-            int i = obj.step_traj.locatePieceIdx(time_local); // 改变这个esdf_temp，locatePieceIdx为引用，不能传入time_seed_f
-            const Eigen::Matrix<double, 6, 3> &c = coeffs.block<6, 3>(i * 6, 0); // 确定这段的Id
-            double s1 = time_local; 
+            int i = obj.step_traj.locatePieceIdx(time_local);
+            const Eigen::Matrix<double, 6, 3> &c = coeffs.block<6, 3>(i * 6, 0);
+            double s1 = time_local;
             double s2 = s1 * s1;
             double s3 = s2 * s1;
             double s4 = s2 * s2;
@@ -846,28 +865,27 @@ public:
             gradAccTotal.setZero();
             gradJerTotal.setZero();
             double yaw = pos(2);
-            Eigen::Matrix3d rotate = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix(); 
+            Eigen::Matrix3d rotate = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             Eigen::Matrix3d St     = obj.sv_manager -> getScale(time_seed_f);
             double pena   = 0.0;
             pos(2) = 0.0;
             double violaYawGrad=0;
             double violaPosPena=0;
-             if( sdf_value < 0 ) {gradp_rel = rotate.transpose() * gradp_rel;}//内部世界坐标系下SDF梯度不对
-            if (obj.grad_cost_p_sw( pos_eva, pos, rotate, yaw, 
-                                    St, sdf_value, gradp_rel, 
+             if( sdf_value < 0 ) {gradp_rel = rotate.transpose() * gradp_rel;}
+            if (obj.grad_cost_p_sw( pos_eva, pos, rotate, yaw,
+                                    St, sdf_value, gradp_rel,
                                     violaPosPenaGrad, violaYawGrad, violaPosPena))
             {
                 gradPos  += weightPos * violaPosPenaGrad;
                 grad_yaw += weightPos * violaYawGrad;
                 pena     += weightPos * violaPosPena;
-                // cost     += pena; //移到后面进行critical section 操作
-                obj.ori_cost_pos += violaPosPena;
+                tl_ori_cost_pos[tid] += violaPosPena;
             }
 
             gradPosTotal    = gradPos;
             gradPosTotal(2) = grad_yaw;
-            Eigen::Matrix<double , 6, 3> gdC = ( beta0  * gradPosTotal.transpose()   +  
-                                                 beta1  * gradVelTotal.transpose()   +  
+            Eigen::Matrix<double , 6, 3> gdC = ( beta0  * gradPosTotal.transpose()   +
+                                                 beta1  * gradVelTotal.transpose()   +
                                                  beta2  * gradAccTotal.transpose()   +
                                                  beta3  * gradJerTotal.transpose()  );
 
@@ -878,18 +896,20 @@ public:
             if (!std::isfinite(pena) || !std::isfinite(gdT) || !gdC.allFinite()) {
                 continue;
             }
-            #pragma omp critical
+            tl_cost[tid] += pena;
+            tl_gradC[tid].block<6, 3>(i * 6, 0) += gdC;
+            for (int j = 0; j < i; j++)
             {
-                cost     += pena;
-                gradC.block<6, 3>(i * 6, 0) += gdC;
-                for (int j = 0; j < i; j++)
-                {
-                    gradT(j) += gdT;
-                }
+                tl_gradT[tid](j) += gdT;
             }
-
         }
 
+        for (int t = 0; t < num_threads; ++t) {
+            gradC += tl_gradC[t];
+            gradT += tl_gradT[t];
+            cost += tl_cost[t];
+            obj.ori_cost_pos += tl_ori_cost_pos[t];
+        }
 
         return;
     }

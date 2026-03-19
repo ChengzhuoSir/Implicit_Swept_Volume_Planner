@@ -3,6 +3,7 @@
 #include <esv_planner/common.h>
 #include <esv_planner/grid_map.h>
 #include <esv_planner/footprint_model.h>
+#include <unordered_map>
 #include <vector>
 
 namespace esv_planner {
@@ -22,6 +23,12 @@ public:
   // SafeYaw: find collision-free yaw angles at a given (x, y)
   std::vector<int> safeYawIndices(double wx, double wy) const;
 
+  // Convenience: count of safe yaw bins (uses cache)
+  int safeYawCount(double wx, double wy) const;
+
+  // Convenience: whether any safe yaw exists (uses cache)
+  bool hasAnySafeYaw(double wx, double wy) const;
+
   // Check if a specific yaw bin is safe at (wx, wy)
   bool isYawSafe(double wx, double wy, int yaw_bin) const;
 
@@ -38,6 +45,9 @@ private:
 
   // Robot kernel: for each yaw bin, a list of relative grid offsets that the robot occupies
   std::vector<std::vector<GridIndex>> kernels_;
+
+  // Cache: grid linear index -> safe yaw bin indices
+  mutable std::unordered_map<int, std::vector<int>> safe_yaw_cache_;
 };
 
 }  // namespace esv_planner

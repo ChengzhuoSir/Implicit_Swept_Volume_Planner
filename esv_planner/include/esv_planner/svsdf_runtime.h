@@ -5,6 +5,7 @@
 #include <ros/ros.h>
 
 #include <Eigen/Core>
+#include <unordered_map>
 
 #include "esv_planner/collision_checker.h"
 #include "esv_planner/common.h"
@@ -66,6 +67,20 @@ class SvsdfRuntime {
                                   CandidateResult* result);
   bool IsTrajectoryFeasible(const Trajectory& traj, double* min_clearance,
                             double* max_vel, double* max_acc) const;
+
+  // Segment solve cache
+  using SegmentCacheKey = std::pair<size_t, bool>; // (seg_index, is_strict)
+  struct SegmentCacheHash {
+    size_t operator()(const SegmentCacheKey& k) const {
+      return std::hash<size_t>()(k.first) ^ (std::hash<bool>()(k.second) << 16);
+    }
+  };
+  using SegmentCache = std::unordered_map<SegmentCacheKey, Trajectory, SegmentCacheHash>;
+
+  bool SolveStrictCached(size_t idx, const std::vector<SE2State>& wp,
+                         Trajectory* traj, SegmentCache& cache);
+  bool OptimizeLowRiskCached(size_t idx, const std::vector<SE2State>& wp,
+                             double t, Trajectory* traj, SegmentCache& cache);
 
   GridMap grid_map_;
   FootprintModel footprint_;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -12,9 +13,13 @@
 
 namespace esv_planner {
 
+// Forward-declare KD-tree wrapper (defined in topology_planner.cpp)
+struct KDTreeWrapper;
+
 class TopologyPlanner {
  public:
   TopologyPlanner();
+  ~TopologyPlanner();
 
   void init(const GridMap& map, const CollisionChecker& checker, int num_samples, int knn,
             int max_paths, double inscribed_radius);
@@ -58,6 +63,9 @@ class TopologyPlanner {
   std::vector<std::vector<std::pair<int, double>>> adjacency_;
   std::vector<Eigen::Vector2d> base_nodes_;
   std::vector<std::vector<std::pair<int, double>>> base_adjacency_;
+
+  // KD-tree for fast KNN (pimpl to avoid nanoflann/PI macro conflict)
+  std::unique_ptr<KDTreeWrapper> kdtree_;
 };
 
 }  // namespace esv_planner

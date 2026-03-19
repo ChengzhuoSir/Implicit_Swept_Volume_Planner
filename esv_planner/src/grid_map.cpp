@@ -1,5 +1,4 @@
 #include "esv_planner/grid_map.h"
-#include <queue>
 #include <cmath>
 #include <algorithm>
 
@@ -11,62 +10,82 @@ bool isOccupiedValue(int8_t val) {
   return val > 50 || val < 0;
 }
 
+// Felzenszwalb-Huttenlocher 1D squared-distance transform
+void distanceTransform1D(const double* f, double* d, int* v, double* z, int n) {
+  int k = 0;
+  v[0] = 0;
+  z[0] = -1e18;
+  z[1] = 1e18;
+  for (int q = 1; q < n; ++q) {
+    double s;
+    while (true) {
+      s = ((f[q] + (double)q * q) - (f[v[k]] + (double)v[k] * v[k])) /
+          (2.0 * q - 2.0 * v[k]);
+      if (s > z[k]) break;
+      --k;
+    }
+    ++k;
+    v[k] = q;
+    z[k] = s;
+    z[k + 1] = 1e18;
+  }
+  k = 0;
+  for (int q = 0; q < n; ++q) {
+    while (z[k + 1] < q) ++k;
+    d[q] = (double)(q - v[k]) * (q - v[k]) + f[v[k]];
+  }
+}
+
 std::vector<double> computeDistanceField(int width,
                                          int height,
                                          double resolution,
                                          const std::vector<int8_t>& grid,
                                          bool source_is_occupied) {
   const int n = width * height;
-  std::vector<double> dist(n, kInf);
+  const double INF = 1e18;
 
-  struct Cell {
-    int x, y;
-    double dist;
-    bool operator>(const Cell& o) const { return dist > o.dist; }
-  };
+  // Initialize: source cells = 0, others = INF
+  std::vector<double> field(n, INF);
+  for (int i = 0; i < n; ++i) {
+    if (isOccupiedValue(grid[i]) == source_is_occupied) {
+      field[i] = 0.0;
+    }
+  }
 
-  std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> pq;
+  const int max_dim = std::max(width, height);
+  std::vector<double> f(max_dim);
+  std::vector<double> d(max_dim);
+  std::vector<int> v(max_dim);
+  std::vector<double> z(max_dim + 1);
+
+  // Row-wise pass
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
-      const int idx = y * width + x;
-      const bool occupied = isOccupiedValue(grid[idx]);
-      if (occupied == source_is_occupied) {
-        dist[idx] = 0.0;
-        pq.push({x, y, 0.0});
-      }
+      f[x] = field[y * width + x];
+    }
+    distanceTransform1D(f.data(), d.data(), v.data(), z.data(), width);
+    for (int x = 0; x < width; ++x) {
+      field[y * width + x] = d[x];
     }
   }
 
-  const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-  const int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-  const double dd8[] = {1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414};
-
-  auto isInside = [width, height](int gx, int gy) {
-    return gx >= 0 && gx < width && gy >= 0 && gy < height;
-  };
-
-  while (!pq.empty()) {
-    Cell c = pq.top();
-    pq.pop();
-
-    const int idx = c.y * width + c.x;
-    if (c.dist > dist[idx]) continue;
-
-    for (int i = 0; i < 8; ++i) {
-      const int nx = c.x + dx8[i];
-      const int ny = c.y + dy8[i];
-      if (!isInside(nx, ny)) continue;
-
-      const double nd = c.dist + dd8[i] * resolution;
-      const int nidx = ny * width + nx;
-      if (nd < dist[nidx]) {
-        dist[nidx] = nd;
-        pq.push({nx, ny, nd});
-      }
+  // Column-wise pass
+  for (int x = 0; x < width; ++x) {
+    for (int y = 0; y < height; ++y) {
+      f[y] = field[y * width + x];
+    }
+    distanceTransform1D(f.data(), d.data(), v.data(), z.data(), height);
+    for (int y = 0; y < height; ++y) {
+      field[y * width + x] = d[y];
     }
   }
 
-  return dist;
+  // Convert squared grid distance to meters
+  for (int i = 0; i < n; ++i) {
+    field[i] = std::sqrt(field[i]) * resolution;
+  }
+
+  return field;
 }
 
 }  // namespace

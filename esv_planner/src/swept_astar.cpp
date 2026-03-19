@@ -156,7 +156,7 @@ bool SweptAstar::isTraversable(int gx, int gy,
 
   if (checker_ != nullptr && options.min_safe_yaw_count > 0) {
     const Eigen::Vector2d world = map_->gridToWorld(gx, gy);
-    if (static_cast<int>(checker_->safeYawIndices(world.x(), world.y()).size()) <
+    if (static_cast<int>(checker_->safeYawCount(world.x(), world.y())) <
         options.min_safe_yaw_count) {
       return false;
     }
@@ -208,7 +208,7 @@ bool SweptAstar::transitionTraversable(
         return false;
       }
       if (options.min_safe_yaw_count > 0 &&
-          static_cast<int>(checker_->safeYawIndices(point.x(), point.y()).size()) <
+          static_cast<int>(checker_->safeYawCount(point.x(), point.y())) <
               options.min_safe_yaw_count) {
         return false;
       }

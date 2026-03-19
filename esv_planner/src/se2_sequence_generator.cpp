@@ -47,7 +47,7 @@ bool IsHighRiskConfiguration(const GridMap& map, const CollisionChecker& checker
                              const SE2State& desired, const SE2State& assigned) {
   const double esdf = map.getEsdf(desired.x, desired.y);
   const int safe_count =
-      static_cast<int>(checker.safeYawIndices(desired.x, desired.y).size());
+      static_cast<int>(checker.safeYawCount(desired.x, desired.y));
   const int bins = checker.numYawBins();
   const int desired_bin = checker.binFromYaw(desired.yaw);
   const int assigned_bin = checker.binFromYaw(assigned.yaw);
@@ -74,7 +74,7 @@ FootprintClearanceProbe EvaluateFootprintClearance(const GridMap& map,
                                                    const SE2State& state) {
   FootprintClearanceProbe probe;
   probe.safe_yaw_count =
-      static_cast<int>(checker.safeYawIndices(state.x, state.y).size());
+      static_cast<int>(checker.safeYawCount(state.x, state.y));
 
   const auto& samples = checker.footprint().denseBodySamples(
       map.resolution() * 0.5, map.resolution());

@@ -266,7 +266,7 @@ bool CorridorPositionAllowed(const GridMap& map, const CollisionChecker& checker
     return false;
   }
   if (min_safe_yaw_count > 0 &&
-      static_cast<int>(checker.safeYawIndices(point.x(), point.y()).size()) <
+      static_cast<int>(checker.safeYawCount(point.x(), point.y())) <
           min_safe_yaw_count) {
     return false;
   }
@@ -663,25 +663,47 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
   std::vector<CandidateResult> candidate_results;
   std::vector<CandidateResult> degraded_results;
   candidate_results.reserve(topo_paths.size());
+
+  // Stage A: parallel SE2 sequence generation + waypoint push
+  struct PreprocessedCandidate {
+    std::vector<MotionSegment> segments;
+    bool valid = false;
+  };
+  std::vector<PreprocessedCandidate> preprocessed(topo_paths.size());
+
+  #pragma omp parallel for schedule(dynamic)
   for (size_t i = 0; i < topo_paths.size(); ++i) {
+    std::vector<MotionSegment> raw_segments =
+        se2_generator_.generate(topo_paths[i], start_state, goal_state);
+    if (raw_segments.empty()) {
+      continue;
+    }
+    PushSegmentWaypointsFromObstacles(&raw_segments);
+    preprocessed[i].segments = std::move(raw_segments);
+    preprocessed[i].valid = true;
+  }
+
+  // Stage B: serial optimization + early pruning
+  for (size_t i = 0; i < preprocessed.size(); ++i) {
+    if (!preprocessed[i].valid) {
+      ROS_WARN("Path %zu discarded: no motion segments", i);
+      continue;
+    }
     const double elapsed = (ros::WallTime::now() - optimize_start).toSec();
     if (elapsed > optimize_timeout_sec) {
       ROS_WARN("Plan() optimization timeout after %.1fs, evaluated %zu/%zu paths",
                elapsed, i, topo_paths.size());
       break;
     }
-    const std::vector<MotionSegment> raw_segments =
-        se2_generator_.generate(topo_paths[i], start_state, goal_state);
-    if (raw_segments.empty()) {
-      ROS_WARN("Path %zu discarded: no motion segments", i);
+    // Early pruning: skip candidates with many more segments than best so far
+    if (!candidate_results.empty() &&
+        preprocessed[i].segments.size() >
+            2 * candidate_results[0].trajectory.pos_pieces.size()) {
+      ROS_INFO("Path %zu pruned: too many segments (%zu)", i, preprocessed[i].segments.size());
       continue;
     }
 
-    // Push all waypoints (including segment boundaries) away from obstacles
-    std::vector<MotionSegment> segments = raw_segments;
-    PushSegmentWaypointsFromObstacles(&segments);
-
-    const CandidateResult candidate = EvaluateCandidate(segments);
+    const CandidateResult candidate = EvaluateCandidate(preprocessed[i].segments);
     if (candidate.trajectory.empty()) {
       ROS_WARN("Path %zu discarded: infeasible segment or stitched trajectory", i);
       continue;
@@ -865,6 +887,7 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
   CandidateResult result;
   result.support_points = CountSupportPoints(segments);
 
+  SegmentCache cache;
   std::vector<Trajectory> segment_trajectories(segments.size());
   std::vector<bool> escalated(segments.size(), false);
   int high_risk_segments = 0;
@@ -879,20 +902,20 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
       ++high_risk_segments;
       ROS_INFO("Runtime stage: solving high-risk segment %zu with strict SE(2), points=%zu",
                i, segments[i].waypoints.size());
-      if (!SolveStrictSegment(segments[i].waypoints, &segment_traj)) {
+      if (!SolveStrictCached(i, segments[i].waypoints, &segment_traj, cache)) {
         ROS_WARN("Strict SE(2) solve failed on high-risk segment %zu", i);
         return CandidateResult();
       }
     } else {
       ROS_INFO("Runtime stage: solving low-risk segment %zu in R^2, points=%zu",
                i, segments[i].waypoints.size());
-      if (!OptimizeLowRiskSegment(segments[i].waypoints, seg_time, &segment_traj)) {
+      if (!OptimizeLowRiskCached(i, segments[i].waypoints, seg_time, &segment_traj, cache)) {
         ROS_WARN("Low-risk segment %zu failed in both R^2 and strict SE(2)", i);
         return CandidateResult();
       }
       double segment_clearance = -kInf;
       if (!IsTrajectoryFeasible(segment_traj, &segment_clearance, nullptr, nullptr)) {
-        if (!SolveStrictSegment(segments[i].waypoints, &segment_traj)) {
+        if (!SolveStrictCached(i, segments[i].waypoints, &segment_traj, cache)) {
           ROS_WARN("Low-risk segment %zu escalation to strict SE(2) failed", i);
           return CandidateResult();
         }
@@ -927,7 +950,7 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
     bool upgraded_low_risk = false;
     for (size_t i = 0; i < segments.size(); ++i) {
       if (segments[i].risk == RiskLevel::LOW && !escalated[i]) {
-        if (!SolveStrictSegment(segments[i].waypoints, &segment_trajectories[i])) {
+        if (!SolveStrictCached(i, segments[i].waypoints, &segment_trajectories[i], cache)) {
           ROS_WARN("Low-risk segment %zu final strict SE(2) upgrade failed", i);
           return CandidateResult();
         }
@@ -2080,6 +2103,36 @@ bool SvsdfRuntime::IsTrajectoryFeasible(const Trajectory& traj, double* min_clea
   }
 
   return std::isfinite(clearance) && clearance > -0.051;
+}
+
+bool SvsdfRuntime::SolveStrictCached(size_t idx, const std::vector<SE2State>& wp,
+                                     Trajectory* traj, SegmentCache& cache) {
+  SegmentCacheKey key(idx, true);
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    *traj = it->second;
+    return !traj->empty();
+  }
+  bool ok = SolveStrictSegment(wp, traj);
+  if (ok && !traj->empty()) {
+    cache[key] = *traj;
+  }
+  return ok;
+}
+
+bool SvsdfRuntime::OptimizeLowRiskCached(size_t idx, const std::vector<SE2State>& wp,
+                                         double t, Trajectory* traj, SegmentCache& cache) {
+  SegmentCacheKey key(idx, false);
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    *traj = it->second;
+    return !traj->empty();
+  }
+  bool ok = OptimizeLowRiskSegment(wp, t, traj);
+  if (ok && !traj->empty()) {
+    cache[key] = *traj;
+  }
+  return ok;
 }
 
 double SvsdfRuntime::EstimateSegmentTime(

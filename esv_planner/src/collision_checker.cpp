@@ -10,6 +10,7 @@ void CollisionChecker::init(const GridMap& map, const FootprintModel& footprint,
   footprint_ = &footprint;
   num_yaw_bins_ = num_yaw_bins;
   generateRobotKernels();
+  safe_yaw_cache_.clear();
 }
 
 void CollisionChecker::generateRobotKernels() {
@@ -54,13 +55,27 @@ bool CollisionChecker::isFree(const SE2State& state) const {
 }
 
 std::vector<int> CollisionChecker::safeYawIndices(double wx, double wy) const {
+  GridIndex gi = map_->worldToGrid(wx, wy);
+  if (!map_->isInside(gi.x, gi.y)) return {};
+  int key = map_->linearIndex(gi.x, gi.y);
+  auto it = safe_yaw_cache_.find(key);
+  if (it != safe_yaw_cache_.end()) return it->second;
   std::vector<int> safe;
   for (int bin = 0; bin < num_yaw_bins_; ++bin) {
     if (isYawSafe(wx, wy, bin)) {
       safe.push_back(bin);
     }
   }
+  safe_yaw_cache_[key] = safe;
   return safe;
+}
+
+int CollisionChecker::safeYawCount(double wx, double wy) const {
+  return static_cast<int>(safeYawIndices(wx, wy).size());
+}
+
+bool CollisionChecker::hasAnySafeYaw(double wx, double wy) const {
+  return !safeYawIndices(wx, wy).empty();
 }
 
 bool CollisionChecker::isYawSafe(double wx, double wy, int yaw_bin) const {
