@@ -52,6 +52,11 @@ struct PlanningStats {
   double total_solve_time = 0.0;
   double search_time = 0.0;
   double optimization_time = 0.0;
+  double preprocess_time = 0.0;
+  double segment_solve_time = 0.0;
+  double full_feasibility_time = 0.0;
+  double tail_refine_time = 0.0;
+  double recovery_time = 0.0;
   double min_clearance = -std::numeric_limits<double>::infinity();
   int coarse_path_points = 0;
   int support_points = 0;
@@ -60,7 +65,7 @@ struct PlanningStats {
 
   std::vector<double> asVector() const {
     std::vector<double> values;
-    values.reserve(8);
+    values.reserve(13);
     values.push_back(total_solve_time);
     values.push_back(search_time);
     values.push_back(optimization_time);
@@ -69,6 +74,11 @@ struct PlanningStats {
     values.push_back(static_cast<double>(support_points));
     values.push_back(static_cast<double>(local_obstacle_points));
     values.push_back(static_cast<double>(optimizer_iterations));
+    values.push_back(preprocess_time);
+    values.push_back(segment_solve_time);
+    values.push_back(full_feasibility_time);
+    values.push_back(tail_refine_time);
+    values.push_back(recovery_time);
     return values;
   }
 };

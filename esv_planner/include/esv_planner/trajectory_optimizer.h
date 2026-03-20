@@ -9,7 +9,7 @@
 namespace esv_planner {
 
 struct OptimizerParams {
-  int max_iterations = 30;
+  int max_iterations = 15;
   double lambda_smooth = 1.0;
   double lambda_time = 1.0;
   double lambda_safety = 50.0;
@@ -20,7 +20,7 @@ struct OptimizerParams {
   double max_acc = 2.0;
   double max_yaw_rate = 1.5;
   double safety_margin = 0.1;
-  double step_size = 0.005;
+  double step_size = 0.01;
 };
 
 class TrajectoryOptimizer {

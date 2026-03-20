@@ -41,7 +41,8 @@ class TopologyPlanner {
   void rebuildBaseRoadmap();
   TopoPath dijkstra(int src, int dst, const std::vector<double>& node_penalty,
                     const std::set<std::pair<int, int>>& blocked_edges,
-                    const std::unordered_set<int>& blocked_nodes) const;
+                    const std::unordered_set<int>& blocked_nodes,
+                    std::vector<int>* out_indices = nullptr) const;
   std::vector<TopoPath> searchPathsImpl(
       const std::set<std::pair<int, int>>& blocked_edges,
       const std::unordered_set<int>& blocked_nodes) const;
@@ -63,6 +64,7 @@ class TopologyPlanner {
   std::vector<std::vector<std::pair<int, double>>> adjacency_;
   std::vector<Eigen::Vector2d> base_nodes_;
   std::vector<std::vector<std::pair<int, double>>> base_adjacency_;
+  int base_total_edges_ = 0;
 
   // KD-tree for fast KNN (pimpl to avoid nanoflann/PI macro conflict)
   std::unique_ptr<KDTreeWrapper> kdtree_;

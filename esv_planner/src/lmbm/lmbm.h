@@ -48,7 +48,7 @@ struct lmbm_parameter_t
     /**
      * Maximum number of iterations.
      */
-    int max_iterations = 10000;
+    int max_iterations = 5000;
 
     /**
      * Maximum number of function evaluations.

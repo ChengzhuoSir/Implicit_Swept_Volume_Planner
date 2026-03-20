@@ -1,20 +1,23 @@
 footprint: [0.20, 0.25, 0.20, -0.25, -0.10, -0.25, -0.10, -0.09, -0.30, -0.09, -0.30, 0.09, -0.10, 0.09, -0.10, 0.25]
 inscribed_radius: 0.10
 
+startup_wait_for_map: true
+startup_map_wait_timeout: 0.0
+startup_map_wait_poll: 1.0
+
 meshTopic: "/esv_planner/mesh"
 edgeTopic: "/esv_planner/mesh_edges"
 vertexTopic: "/esv_planner/mesh_vertices"
 inputdata: "meshes/robot_t_shape.obj"
-loadStartEnd: false
-poly_params: [0.0, 0.0, 0.0]
 
-selfmapresu: 0.10
 threads_num: 8
-momentum: 0.0
-eps: 0.08
-transparency: 1.0
-testRate: 0.0
-ts: 2.0
+occupancy_resolution: 0.10
+debug_output: false
+sta_threshold: 1
+colli_thres: 0.05
+kernel_size: 7
+kernel_yaw_num: 18
+front_end_safeh: 0.05
 
 vehicleMass: 0.61
 gravAcc: 9.8
@@ -23,33 +26,15 @@ vertDrag: 0.10
 parasDrag: 0.01
 speedEps: 0.0001
 
-voxelWidth: 0.10
-mapBound: [-10.0, 20.0, -5.0, 55.0, -0.1, 0.1]
-occupancy_resolution: 0.10
-debug_output: false
-sta_threshold: 1
-colli_thres: 0.05
-
-kernel_size: 7
-kernel_yaw_num: 18
-front_end_safeh: 0.05
-
-topology:
-  num_samples: 15000
-  knn: 50
-  max_paths: 10
-
-enableearlyExit: false
-debugpause: 1
-
 smoothingEps: 1.0e-2
 integralIntervs: 10
 relCostTol: 1.0e-8
 relCostTolMidEnd: 1.0e-8
+eps: 0.08
+
 vmax: 1.2
 omgmax: 2.5
 thetamax: 6.0
-
 weight_v: 10.0
 weight_a: 20.0
 weight_p: 150.0
@@ -61,11 +46,51 @@ rho_mid_end: 1.0
 rho: 2.0
 safety_hor: 0.08
 inittime: 0.9
-
 mem_size: 16
 past: 64
 min_step: 1.0e-32
 g_epsilon: 0.0
+
+topology:
+  num_samples: 15000
+  knn: 10
+  max_paths: 2
+
+se2:
+  discretization_step: 0.15
+  max_push_attempts: 5
+
+optimizer:
+  max_iterations: 100
+  lambda_smooth: 1.0
+  lambda_time: 1.0
+  lambda_safety: 10.0
+  lambda_dynamics: 1.0
+  lambda_pos_residual: 5.0
+  lambda_yaw_residual: 2.0
+  max_vel: 1.0
+  max_acc: 2.0
+  max_yaw_rate: 1.5
+  safety_margin: 0.05
+  step_size: 0.01
+
+hybrid_astar:
+  step_size: 0.01
+  wheel_base: 0.5
+  max_steer: 0.6
+  steer_samples: 5
+  goal_tolerance_pos: 0.35
+  goal_tolerance_yaw: 0.4
+  reverse_penalty: 2.0
+  steer_penalty: 0.2
+  steer_change_penalty: 0.2
+  switch_penalty: 2.0
+  max_expansions: 50000
+  fast_pass_max_expansions: 8000
+  fast_pass_steer_samples: 3
+  pose_recovery_max_radius: 0.6
+  pose_recovery_radial_step: 0.05
+  pose_recovery_angular_samples: 24
 
 start_pose:
   x: 3.16

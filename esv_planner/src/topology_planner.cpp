@@ -326,6 +326,7 @@ void TopologyPlanner::init(const GridMap& map, const CollisionChecker& checker, 
 void TopologyPlanner::rebuildBaseRoadmap() {
   base_nodes_.clear();
   base_adjacency_.clear();
+  base_total_edges_ = 0;
   if (map_ == nullptr || checker_ == nullptr) {
     base_roadmap_ready_ = false;
     return;
@@ -374,6 +375,7 @@ void TopologyPlanner::rebuildBaseRoadmap() {
       }
     }
   }
+  base_total_edges_ = total_edges;
   base_roadmap_ready_ = true;
   ROS_INFO("Topology base roadmap cached: nodes=%zu, edges=%d",
            base_nodes_.size(), total_edges);
@@ -392,13 +394,7 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
   nodes_.insert(nodes_.end(), base_nodes_.begin(), base_nodes_.end());
 
   adjacency_.assign(nodes_.size(), std::vector<std::pair<int, double>>());
-  int total_edges = 0;
-  for (size_t i = 0; i < base_adjacency_.size(); ++i) {
-    for (const auto& edge : base_adjacency_[i]) {
-      adjacency_[i + 2].push_back(std::make_pair(edge.first + 2, edge.second));
-      ++total_edges;
-    }
-  }
+  int special_edges = 0;
 
   const auto connect_special_node = [&](int special_index) {
     const double query[2] = {nodes_[static_cast<size_t>(special_index)].x(),
@@ -421,7 +417,7 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
           std::make_pair(node_index, dist));
       adjacency_[static_cast<size_t>(node_index)].push_back(
           std::make_pair(special_index, dist));
-      total_edges += 2;
+      special_edges += 2;
       ++connections;
     }
   };
@@ -432,9 +428,10 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
     const double direct_distance = (goal - start).norm();
     adjacency_[0].push_back(std::make_pair(1, direct_distance));
     adjacency_[1].push_back(std::make_pair(0, direct_distance));
-    total_edges += 2;
+    special_edges += 2;
   }
 
+  const int total_edges = base_total_edges_ + special_edges;
   ROS_INFO("Topology Roadmap: nodes=%zu, edges=%d, start_neighbors=%zu, goal_neighbors=%zu",
            nodes_.size(), total_edges, adjacency_[0].size(), adjacency_[1].size());
 }
@@ -442,7 +439,8 @@ void TopologyPlanner::buildRoadmap(const Eigen::Vector2d& start, const Eigen::Ve
 TopoPath TopologyPlanner::dijkstra(
     int src, int dst, const std::vector<double>& node_penalty,
     const std::set<std::pair<int, int>>& blocked_edges,
-    const std::unordered_set<int>& blocked_nodes) const {
+    const std::unordered_set<int>& blocked_nodes,
+    std::vector<int>* out_indices) const {
   const int n = static_cast<int>(nodes_.size());
   std::vector<double> distance(static_cast<size_t>(n), kInf);
   std::vector<int> previous(static_cast<size_t>(n), -1);
@@ -451,6 +449,25 @@ TopoPath TopologyPlanner::dijkstra(
   using QueueItem = std::pair<double, int>;
   std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> open;
   open.push(std::make_pair(0.0, src));
+
+  auto relax_edge = [&](int current, int next, double weight) {
+    if (blocked_nodes.count(next) && next != dst) {
+      return;
+    }
+    if (blocked_edges.count(std::make_pair(current, next))) {
+      return;
+    }
+
+    if (!node_penalty.empty()) {
+      weight += node_penalty[static_cast<size_t>(next)];
+    }
+    const double candidate = distance[static_cast<size_t>(current)] + weight;
+    if (candidate < distance[static_cast<size_t>(next)]) {
+      distance[static_cast<size_t>(next)] = candidate;
+      previous[static_cast<size_t>(next)] = current;
+      open.push(std::make_pair(candidate, next));
+    }
+  };
 
   while (!open.empty()) {
     const double best_distance = open.top().first;
@@ -464,30 +481,22 @@ TopoPath TopologyPlanner::dijkstra(
       break;
     }
 
+    if (current >= 2) {
+      const size_t base_index = static_cast<size_t>(current - 2);
+      for (const auto& edge : base_adjacency_[base_index]) {
+        relax_edge(current, edge.first + 2, edge.second);
+      }
+    }
     for (const auto& edge : adjacency_[static_cast<size_t>(current)]) {
-      const int next = edge.first;
-      if (blocked_nodes.count(next) && next != dst) {
-        continue;
-      }
-      if (blocked_edges.count(std::make_pair(current, next))) {
-        continue;
-      }
-
-      double weight = edge.second;
-      if (!node_penalty.empty()) {
-        weight += node_penalty[static_cast<size_t>(next)];
-      }
-      const double candidate = distance[static_cast<size_t>(current)] + weight;
-      if (candidate < distance[static_cast<size_t>(next)]) {
-        distance[static_cast<size_t>(next)] = candidate;
-        previous[static_cast<size_t>(next)] = current;
-        open.push(std::make_pair(candidate, next));
-      }
+      relax_edge(current, edge.first, edge.second);
     }
   }
 
   TopoPath path;
   if (!std::isfinite(distance[static_cast<size_t>(dst)])) {
+    if (out_indices != nullptr) {
+      out_indices->clear();
+    }
     return path;
   }
 
@@ -496,6 +505,9 @@ TopoPath TopologyPlanner::dijkstra(
     indices.push_back(v);
   }
   std::reverse(indices.begin(), indices.end());
+  if (out_indices != nullptr) {
+    *out_indices = indices;
+  }
   for (int index : indices) {
     path.waypoints.emplace_back(nodes_[static_cast<size_t>(index)]);
   }
@@ -539,9 +551,8 @@ std::vector<TopoPath> TopologyPlanner::searchPathsAvoidingCenters(
     }
   }
 
-  for (size_t i = 0; i < adjacency_.size(); ++i) {
-    for (const auto& edge : adjacency_[i]) {
-      const int next = edge.first;
+  for (size_t i = 0; i < nodes_.size(); ++i) {
+    const auto inspect_edge = [&](int next) {
       for (const Eigen::Vector2d& center : centers) {
         if (DistanceToSegment(center, nodes_[i], nodes_[static_cast<size_t>(next)]) <=
             inflated_radius) {
@@ -549,6 +560,16 @@ std::vector<TopoPath> TopologyPlanner::searchPathsAvoidingCenters(
           break;
         }
       }
+    };
+
+    if (i >= 2) {
+      const size_t base_index = i - 2;
+      for (const auto& edge : base_adjacency_[base_index]) {
+        inspect_edge(edge.first + 2);
+      }
+    }
+    for (const auto& edge : adjacency_[i]) {
+      inspect_edge(edge.first);
     }
   }
 
@@ -581,37 +602,11 @@ std::vector<TopoPath> TopologyPlanner::searchPathsImpl(
     return key;
   };
 
-  const auto indices_from_path = [&](const TopoPath& path) {
-    std::vector<int> indices;
-    indices.reserve(path.waypoints.size());
-    for (const TopoWaypoint& waypoint : path.waypoints) {
-      int best_index = -1;
-      double best_distance = kInf;
-      for (int i = 0; i < node_count; ++i) {
-        const double distance = (nodes_[static_cast<size_t>(i)] - waypoint.pos).norm();
-        if (distance < best_distance) {
-          best_distance = distance;
-          best_index = i;
-        }
-      }
-      if (best_index >= 0 && best_distance < 1e-6) {
-        indices.push_back(best_index);
-      } else {
-        indices.clear();
-        break;
-      }
-    }
-    return indices;
-  };
-
   for (int iter = 0; iter < max_paths_ * 6; ++iter) {
-    TopoPath path = dijkstra(src, dst, node_penalty, blocked_edges, blocked_nodes);
-    if (path.waypoints.size() < 2) {
-      break;
-    }
-
-    const std::vector<int> indices = indices_from_path(path);
-    if (indices.size() < 2) {
+    std::vector<int> indices;
+    TopoPath path = dijkstra(src, dst, node_penalty, blocked_edges, blocked_nodes,
+                             &indices);
+    if (path.waypoints.size() < 2 || indices.size() < 2) {
       break;
     }
 

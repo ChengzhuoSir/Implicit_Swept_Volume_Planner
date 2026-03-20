@@ -44,7 +44,14 @@ class SvsdfRuntime {
     int support_points = 0;
     int high_risk_segments = 0;
     int escalated_segments = 0;
+    double segment_solve_time = 0.0;
+    double full_feasibility_time = 0.0;
+    double tail_refine_time = 0.0;
+    double recovery_time = 0.0;
+    int tail_attempts = 0;
+    int tail_pruned = 0;
     bool degraded = false;
+    bool budget_exhausted = false;
   };
 
   void LoadParameters(ros::NodeHandle& pnh);
@@ -52,7 +59,8 @@ class SvsdfRuntime {
   nav_msgs::Path MakePathFromTopo(const TopoPath& path) const;
   nav_msgs::Path MakeTrajectoryPath(const Trajectory& traj) const;
   double EstimateSegmentTime(const std::vector<SE2State>& waypoints) const;
-  CandidateResult EvaluateCandidate(const std::vector<MotionSegment>& segments);
+  CandidateResult EvaluateCandidate(const std::vector<MotionSegment>& segments,
+                                  const ros::WallTime& deadline);
   void PushSegmentWaypointsFromObstacles(std::vector<MotionSegment>* segments) const;
   bool SolveStrictSegment(const std::vector<SE2State>& waypoints,
                           Trajectory* trajectory);
@@ -61,9 +69,11 @@ class SvsdfRuntime {
   bool TryRecoverBottleneck(const std::vector<MotionSegment>& segments,
                             const std::vector<Trajectory>& segment_trajectories,
                             const Trajectory& current_traj,
+                            const ros::WallTime& deadline,
                             CandidateResult* result);
   void MaybeImproveTailTrajectory(const std::vector<MotionSegment>& segments,
                                   const std::vector<Trajectory>& segment_trajectories,
+                                  const ros::WallTime& deadline,
                                   CandidateResult* result);
   bool IsTrajectoryFeasible(const Trajectory& traj, double* min_clearance,
                             double* max_vel, double* max_acc) const;
