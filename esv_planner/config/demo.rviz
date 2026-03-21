@@ -51,7 +51,7 @@ Visualization Manager:
     - Alpha: 1
       Buffer Length: 1
       Class: rviz/Path
-      Color: 0; 255; 0
+      Color: 239; 41; 41
       Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
@@ -95,19 +95,13 @@ Visualization Manager:
       Shaft Length: 0.10000000149011612
       Topic: /esv_planner/trajectory_astar
       Unreliable: false
-      Value: true
+      Value: false
     - Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /esv_planner/markers
       Name: Markers
       Namespaces:
-        best_traj: false
         footprint: true
-        segments: false
-        start_goal: false
-        topo_paths: false
-        traj_astar: false
-        waypoints: false
       Queue Size: 100
       Value: true
     - Alpha: 1
@@ -178,7 +172,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/ThirdPersonFollower
-      Distance: 23.825334548950195
+      Distance: 47.584999084472656
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -186,8 +180,8 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: -6.458892822265625
-        Y: -1.2408849000930786
+        X: -10.900152206420898
+        Y: 19.676742553710938
         Z: -2.384185791015625e-06
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806

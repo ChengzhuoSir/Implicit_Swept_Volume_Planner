@@ -2,12 +2,12 @@
 
 #include <nav_msgs/OccupancyGrid.h>
 
-#include "esv_planner/body_frame_sdf.h"
-#include "esv_planner/footprint_model.h"
-#include "esv_planner/grid_map.h"
-#include "esv_planner/grid_obstacle_source.h"
-#include "esv_planner/swept_astar.h"
-#include "esv_planner/svsdf_evaluator.h"
+#include "esv_planner/env/body_frame_sdf.h"
+#include "esv_planner/env/footprint_model.h"
+#include "esv_planner/env/grid_map.h"
+#include "esv_planner/env/grid_obstacle_source.h"
+#include "esv_planner/global_search/swept_astar.h"
+#include "esv_planner/optimization/evaluator/svsdf_evaluator.h"
 
 namespace esv_planner {
 namespace {

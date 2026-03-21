@@ -1,0 +1,62 @@
+#pragma once
+
+#include <esv_planner/env/body_frame_sdf.h>
+#include <esv_planner/core/common.h>
+#include <Eigen/Dense>
+#include <vector>
+
+namespace esv_planner {
+
+class FootprintModel {
+public:
+  FootprintModel();
+
+  // Set polygon vertices (in body frame, CCW order)
+  void setPolygon(const std::vector<Eigen::Vector2d>& vertices);
+
+  // Inscribed circle radius
+  double inscribedRadius() const { return inscribed_radius_; }
+  void setInscribedRadius(double r) { inscribed_radius_ = r; }
+
+  // Circumscribed circle radius
+  double circumscribedRadius() const { return circumscribed_radius_; }
+
+  // Compute signed distance from a point (in body frame) to the polygon boundary
+  // Positive = outside, Negative = inside
+  double bodyFrameSdf(const Eigen::Vector2d& point) const;
+
+  // Query signed distance, closest point, and gradient in the body frame.
+  BodyFrameQuery bodyFrameQuery(const Eigen::Vector2d& point) const;
+  const BodyFrameSdf& bodyFrameSdfModel() const { return body_frame_sdf_; }
+
+  // Get polygon vertices
+  const std::vector<Eigen::Vector2d>& vertices() const { return vertices_; }
+
+  // Get polygon rotated by yaw
+  std::vector<Eigen::Vector2d> rotatedVertices(double yaw) const;
+
+  // Sample the rotated polygon boundary at approximately `step` spacing.
+  std::vector<Eigen::Vector2d> sampleBoundary(double yaw, double step) const;
+
+  // Dense body-frame samples covering boundary and interior. Cached by
+  // sampling resolution pair and intended for repeated clearance queries.
+  const std::vector<Eigen::Vector2d>& denseBodySamples(double boundary_step,
+                                                       double interior_step) const;
+
+private:
+  struct DenseSampleCache {
+    double boundary_step = 0.0;
+    double interior_step = 0.0;
+    std::vector<Eigen::Vector2d> samples;
+  };
+
+  std::vector<Eigen::Vector2d> vertices_;
+  BodyFrameSdf body_frame_sdf_;
+  double inscribed_radius_ = 0.1;
+  double circumscribed_radius_ = 0.0;
+  mutable std::vector<DenseSampleCache> dense_sample_caches_;
+
+  void computeCircumscribedRadius();
+};
+
+}  // namespace esv_planner

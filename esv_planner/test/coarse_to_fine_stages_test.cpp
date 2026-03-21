@@ -2,11 +2,11 @@
 
 #include <nav_msgs/OccupancyGrid.h>
 
-#include "esv_planner/collision_checker.h"
-#include "esv_planner/footprint_model.h"
-#include "esv_planner/grid_map.h"
-#include "esv_planner/se2_sequence_generator.h"
-#include "esv_planner/topology_planner.h"
+#include "esv_planner/env/collision_checker.h"
+#include "esv_planner/env/footprint_model.h"
+#include "esv_planner/env/grid_map.h"
+#include "esv_planner/optimization/midend/se2_sequence_generator.h"
+#include "esv_planner/global_search/topology_planner.h"
 
 namespace esv_planner {
 namespace {

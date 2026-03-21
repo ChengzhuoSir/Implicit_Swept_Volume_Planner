@@ -3,9 +3,9 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <ros/ros.h>
 
-#include "esv_planner/footprint_model.h"
-#include "esv_planner/grid_map.h"
-#include "esv_planner/se2_svsdf_solver.h"
+#include "esv_planner/env/footprint_model.h"
+#include "esv_planner/env/grid_map.h"
+#include "esv_planner/optimization/backend/se2_svsdf_solver.h"
 
 namespace esv_planner {
 namespace {
