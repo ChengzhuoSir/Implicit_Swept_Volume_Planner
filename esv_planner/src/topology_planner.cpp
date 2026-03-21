@@ -460,6 +460,14 @@ TopoPath TopologyPlanner::dijkstra(
     if (!node_penalty.empty()) {
       weight += node_penalty[static_cast<size_t>(next)];
     }
+    
+    // Voronoi Ridge Bias: add penalty for nodes close to obstacles
+    const double esdf = map_->getEsdf(nodes_[static_cast<size_t>(next)].x(), nodes_[static_cast<size_t>(next)].y());
+    const double safe_margin = inscribed_radius_ * 2.0;
+    if (esdf < safe_margin && esdf > 0.0) {
+      weight += (safe_margin - esdf) * 1.5;
+    }
+
     const double candidate = distance[static_cast<size_t>(current)] + weight;
     if (candidate < distance[static_cast<size_t>(next)]) {
       distance[static_cast<size_t>(next)] = candidate;
@@ -659,7 +667,7 @@ bool TopologyPlanner::configurationLineFree(const TopoWaypoint& a, const TopoWay
   return true;
 }
 
-bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& waypoint, double safe_dist) const {
+bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& waypoint, double safe_dist, const Eigen::Vector2d& tension) const {
   const std::vector<Eigen::Vector2d> boundary =
       checker_->footprint().sampleBoundary(waypoint.yaw, map_->resolution() * 0.5);
   if (boundary.empty()) {
@@ -667,6 +675,8 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& waypoint, double safe_
   }
 
   const double eps = map_->resolution();
+  Eigen::Vector2d momentum = Eigen::Vector2d::Zero();
+  
   for (int attempt = 0; attempt < 24; ++attempt) {
     double min_distance = kInf;
     Eigen::Vector2d worst_world = waypoint.pos;
@@ -689,13 +699,23 @@ bool TopologyPlanner::pushPointFromObstacle(TopoWaypoint& waypoint, double safe_
     if (gradient.norm() < 1e-9) {
       gradient = EsdfAscentDirection(*map_, waypoint.pos, eps);
     }
-    if (gradient.norm() < 1e-9) {
+    
+    Eigen::Vector2d combined_dir = Eigen::Vector2d::Zero();
+    Eigen::Vector2d tension_term = (tension.norm() > 1e-9) ? Eigen::Vector2d(tension.normalized() * 0.3) : Eigen::Vector2d::Zero();
+    if (gradient.norm() >= 1e-9) {
+      combined_dir = (gradient.normalized() * 1.0 + tension_term + momentum * 0.5).normalized();
+    } else if (tension.norm() > 1e-9 || momentum.norm() > 1e-9) {
+      combined_dir = (tension_term + momentum * 0.5).normalized();
+    }
+    
+    if (combined_dir.norm() < 1e-9) {
       return false;
     }
 
     const double deficit = safe_dist - min_distance;
     const double push = std::min(std::max(eps, deficit + eps), 4.0 * eps);
-    waypoint.pos += push * gradient.normalized();
+    waypoint.pos += push * combined_dir;
+    momentum = combined_dir;
     waypoint.has_yaw = true;
   }
 
@@ -719,7 +739,8 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       const double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
       if (esdf < safe_dist ||
           !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
-        if (pushPointFromObstacle(adjusted, safe_dist)) {
+        Eigen::Vector2d tension = (discrete[i - 1].pos + discrete[i + 1].pos) * 0.5 - adjusted.pos;
+        if (pushPointFromObstacle(adjusted, safe_dist, tension)) {
           discrete[i] = WithIncomingYaw(discrete[i - 1], adjusted);
         }
       }
@@ -786,7 +807,8 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
 
       TopoWaypoint pushed(anchor.pos + collision_t * (target.pos - anchor.pos));
       pushed = WithIncomingYaw(anchor, pushed);
-      if (pushPointFromObstacle(pushed, safe_dist) &&
+      Eigen::Vector2d tension = (anchor.pos + target.pos) * 0.5 - pushed.pos;
+      if (pushPointFromObstacle(pushed, safe_dist, tension) &&
           configurationLineFree(anchor, WithIncomingYaw(anchor, pushed)) &&
           (pushed.pos - anchor.pos).norm() > resolution * 0.75) {
         result.push_back(WithIncomingYaw(anchor, pushed));
@@ -807,7 +829,8 @@ void TopologyPlanner::shortenPaths(std::vector<TopoPath>& paths) {
       const double esdf = map_->getEsdf(adjusted.pos.x(), adjusted.pos.y());
       if (esdf < safe_dist ||
           !checker_->isFree(SE2State(adjusted.pos.x(), adjusted.pos.y(), adjusted.yaw))) {
-        if (pushPointFromObstacle(adjusted, safe_dist)) {
+        Eigen::Vector2d tension = (result[k - 1].pos + result[k + 1].pos) * 0.5 - adjusted.pos;
+        if (pushPointFromObstacle(adjusted, safe_dist, tension)) {
           result[k] = WithIncomingYaw(result[k - 1], adjusted);
         }
       }

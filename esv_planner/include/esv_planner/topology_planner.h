@@ -37,7 +37,7 @@ class TopologyPlanner {
   bool configurationLineFree(const TopoWaypoint& a, const TopoWaypoint& b) const;
   bool isTopologicallyDistinct(const TopoPath& path,
                                const std::vector<TopoPath>& existing) const;
-  bool pushPointFromObstacle(TopoWaypoint& waypoint, double safe_dist) const;
+  bool pushPointFromObstacle(TopoWaypoint& waypoint, double safe_dist, const Eigen::Vector2d& tension = Eigen::Vector2d::Zero()) const;
   void rebuildBaseRoadmap();
   TopoPath dijkstra(int src, int dst, const std::vector<double>& node_penalty,
                     const std::set<std::pair<int, int>>& blocked_edges,
