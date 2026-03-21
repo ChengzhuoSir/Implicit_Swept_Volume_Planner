@@ -149,6 +149,27 @@ double ApproximateTrajectoryLength(const Trajectory& traj) {
   return length;
 }
 
+double TrajectorySmoothnessCost(const Trajectory& traj) {
+  if (traj.empty()) {
+    return kInf;
+  }
+
+  double cost = 0.0;
+  for (const PolyPiece& piece : traj.pos_pieces) {
+    const double duration = std::max(1e-3, piece.duration);
+    const int n_sub = 8;
+    const double h = duration / static_cast<double>(n_sub);
+    for (int s = 0; s <= n_sub; ++s) {
+      const double t = s * h;
+      const Eigen::Vector2d acc = piece.acceleration(t);
+      const double weight =
+          (s == 0 || s == n_sub) ? 1.0 : ((s % 2 == 1) ? 4.0 : 2.0);
+      cost += weight * acc.squaredNorm() * h / 3.0;
+    }
+  }
+  return cost;
+}
+
 int CountHighRiskSegments(const std::vector<MotionSegment>& segments, size_t end_index) {
   int count = 0;
   for (size_t i = 0; i < end_index && i < segments.size(); ++i) {
@@ -835,16 +856,6 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
   result.stats.full_feasibility_time = total_full_feasibility_time;
   result.stats.tail_refine_time = total_tail_refine_time;
   result.stats.recovery_time = total_recovery_time;
-  const double optimization_other_time = std::max(
-      0.0, result.stats.optimization_time - preprocess_time -
-               total_segment_solve_time - total_full_feasibility_time -
-               total_tail_refine_time - total_recovery_time);
-  ROS_INFO(
-      "Plan() timing breakdown: topology=%.3fs preprocess=%.3fs segment_solve=%.3fs full_feasibility=%.3fs tail_refinement=%.3fs recovery=%.3fs optimize_other=%.3fs optimize_total=%.3fs",
-      result.stats.search_time, preprocess_time, total_segment_solve_time,
-      total_full_feasibility_time, total_tail_refine_time,
-      total_recovery_time, optimization_other_time,
-      result.stats.optimization_time);
 
   const auto log_final_stage_totals = [&](const char* outcome) {
     ROS_INFO(
@@ -890,78 +901,108 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
         result.stats.full_feasibility_time = total_full_feasibility_time;
         result.stats.tail_refine_time = total_tail_refine_time;
         result.stats.recovery_time = total_recovery_time;
+        result.stats.optimization_time =
+            (ros::WallTime::now() - optimize_start).toSec();
         result.stats.total_solve_time =
             (ros::WallTime::now() - total_start).toSec();
         log_final_stage_totals("centerline_fallback");
         return result;
       }
     }
+    result.stats.optimization_time = (ros::WallTime::now() - optimize_start).toSec();
     result.stats.total_solve_time = (ros::WallTime::now() - total_start).toSec();
     log_final_stage_totals("failed");
     return result;
   }
 
-  std::vector<Trajectory> candidates;
-  candidates.reserve(candidate_results.size());
-  for (size_t i = 0; i < candidate_results.size(); ++i) {
-    candidates.push_back(candidate_results[i].trajectory);
-  }
-
-  // If only one candidate passed EvaluateCandidate, use it directly
-  // (selectBest may re-evaluate with stricter criteria and reject it)
-  Trajectory best;
-  if (candidates.size() == 1) {
-    best = candidates[0];
-  } else {
-    best = optimizer_.selectBest(candidates);
-    if (best.empty() && !candidates.empty()) {
-      // selectBest rejected all candidates; fall back to the one with best clearance
-      size_t best_clearance_idx = 0;
-      double best_clearance = -kInf;
-      for (size_t i = 0; i < candidate_results.size(); ++i) {
-        if (candidate_results[i].min_clearance > best_clearance) {
-          best_clearance = candidate_results[i].min_clearance;
-          best_clearance_idx = i;
-        }
-      }
-      best = candidates[best_clearance_idx];
+  const ros::WallTime selection_start = ros::WallTime::now();
+  size_t best_index = 0;
+  bool found_index = false;
+  double best_clearance = -kInf;
+  for (const CandidateResult& candidate : candidate_results) {
+    if (!candidate.trajectory.empty()) {
+      best_clearance = std::max(best_clearance, candidate.min_clearance);
     }
   }
-  if (best.empty()) {
+  const double clearance_band =
+      std::isfinite(best_clearance)
+          ? std::max(0.005, 0.10 * std::max(0.05, best_clearance))
+          : 0.005;
+
+  bool best_clearance_close = false;
+  double best_smoothness = kInf;
+  size_t best_pieces = std::numeric_limits<size_t>::max();
+  double best_duration = kInf;
+  for (size_t i = 0; i < candidate_results.size(); ++i) {
+    const CandidateResult& candidate = candidate_results[i];
+    if (candidate.trajectory.empty()) {
+      continue;
+    }
+
+    const bool clearance_close =
+        std::isfinite(best_clearance) &&
+        candidate.min_clearance + 1e-6 >= best_clearance - clearance_band;
+    const double smoothness = TrajectorySmoothnessCost(candidate.trajectory);
+    const size_t pieces = candidate.trajectory.pos_pieces.size();
+    const double duration = candidate.trajectory.totalDuration();
+
+    bool better = false;
+    if (!found_index) {
+      better = true;
+    } else if (clearance_close != best_clearance_close) {
+      better = clearance_close;
+    } else if (smoothness + 1e-6 < best_smoothness) {
+      better = true;
+    } else if (std::abs(smoothness - best_smoothness) <= 1e-6 && pieces < best_pieces) {
+      better = true;
+    } else if (std::abs(smoothness - best_smoothness) <= 1e-6 &&
+               pieces == best_pieces && duration + 1e-6 < best_duration) {
+      better = true;
+    } else if (std::abs(smoothness - best_smoothness) <= 1e-6 &&
+               pieces == best_pieces && std::abs(duration - best_duration) <= 1e-6 &&
+               candidate.min_clearance > candidate_results[best_index].min_clearance) {
+      better = true;
+    }
+
+    if (!better) {
+      continue;
+    }
+    best_index = i;
+    found_index = true;
+    best_clearance_close = clearance_close;
+    best_smoothness = smoothness;
+    best_pieces = pieces;
+    best_duration = duration;
+  }
+
+  if (!found_index) {
+    result.stats.optimization_time = (ros::WallTime::now() - optimize_start).toSec();
     result.stats.total_solve_time = (ros::WallTime::now() - total_start).toSec();
     log_final_stage_totals("no_best_candidate");
     return result;
   }
 
-  size_t best_index = 0;
-  bool found_index = false;
-  for (size_t i = 0; i < candidate_results.size(); ++i) {
-    if (candidate_results[i].trajectory.pos_pieces.size() == best.pos_pieces.size() &&
-        std::abs(candidate_results[i].trajectory.totalDuration() -
-                 best.totalDuration()) < 1e-6) {
-      best_index = i;
-      found_index = true;
-      break;
-    }
-  }
-  if (!found_index) {
-    best_index = 0;
+  const double selection_time = (ros::WallTime::now() - selection_start).toSec();
+  CandidateResult final_candidate = candidate_results[best_index];
+  Trajectory best = final_candidate.trajectory;
+  ROS_INFO(
+      "Plan() candidate selection: considered=%zu best=%zu clearance=%.3f smooth=%.3f pieces=%zu duration=%.3f selection=%.3fs",
+      candidate_results.size(), best_index, final_candidate.min_clearance,
+      best_smoothness, best.pos_pieces.size(), best.totalDuration(), selection_time);
+  if (!final_candidate.segments.empty() && !final_candidate.segment_trajectories.empty()) {
+    const ros::WallTime tail_start = ros::WallTime::now();
+    final_candidate.trajectory = best;
+    MaybeImproveTailTrajectory(final_candidate.segments, final_candidate.segment_trajectories,
+                               optimize_deadline, &final_candidate);
+    const double tail_elapsed = (ros::WallTime::now() - tail_start).toSec();
+    final_candidate.tail_refine_time += tail_elapsed;
+    total_tail_refine_time += tail_elapsed;
+    best = final_candidate.trajectory;
   }
 
+  result.stats.optimization_time = (ros::WallTime::now() - optimize_start).toSec();
   result.success = true;
   
-  // Directly write to file for reliable analysis
-  FILE* traj_file = fopen("/home/chengzhuo/workspace/plan/traj_data.csv", "w");
-  if (traj_file) {
-    fprintf(traj_file, "t,x,y,yaw\n");
-    const double total_dur = best.totalDuration();
-    for (double t = 0.0; t <= total_dur; t += 0.05) {
-      SE2State state = best.sample(t);
-      fprintf(traj_file, "%.3f,%.4f,%.4f,%.4f\n", t, state.x, state.y, state.yaw);
-    }
-    fclose(traj_file);
-  }
-
   ROS_INFO("Plan(): best traj pieces=%zu duration=%.3f, sampling first piece c0=(%.4f,%.4f) c1=(%.4f,%.4f)",
            best.pos_pieces.size(), best.totalDuration(),
            best.pos_pieces.empty() ? 0.0 : best.pos_pieces[0].coeffs(0,0),
@@ -970,15 +1011,25 @@ SvsdfPlanResult SvsdfRuntime::Plan(const Eigen::Vector3d& start,
            best.pos_pieces.empty() ? 0.0 : best.pos_pieces[0].coeffs(1,1));
   result.trajectory = MakeTrajectoryPath(best);
   ROS_INFO("Plan(): published trajectory poses=%zu", result.trajectory.poses.size());
-  result.stats.min_clearance = candidate_results[best_index].min_clearance;
-  result.stats.support_points = candidate_results[best_index].support_points;
-  result.stats.local_obstacle_points = candidate_results[best_index].high_risk_segments;
+  result.stats.min_clearance = final_candidate.min_clearance;
+  result.stats.support_points = final_candidate.support_points;
+  result.stats.local_obstacle_points = final_candidate.high_risk_segments;
   result.stats.optimizer_iterations = 0;
   result.stats.segment_solve_time = total_segment_solve_time;
   result.stats.full_feasibility_time = total_full_feasibility_time;
   result.stats.tail_refine_time = total_tail_refine_time;
   result.stats.recovery_time = total_recovery_time;
   result.stats.total_solve_time = (ros::WallTime::now() - total_start).toSec();
+  const double optimization_other_time = std::max(
+      0.0, result.stats.optimization_time - preprocess_time -
+               total_segment_solve_time - total_full_feasibility_time -
+               total_tail_refine_time - total_recovery_time - selection_time);
+  ROS_INFO(
+      "Plan() timing breakdown: topology=%.3fs preprocess=%.3fs segment_solve=%.3fs full_feasibility=%.3fs tail_refinement=%.3fs recovery=%.3fs selection=%.3fs optimize_other=%.3fs optimize_total=%.3fs",
+      result.stats.search_time, preprocess_time, total_segment_solve_time,
+      total_full_feasibility_time, total_tail_refine_time,
+      total_recovery_time, selection_time, optimization_other_time,
+      result.stats.optimization_time);
   log_final_stage_totals("success");
   return result;
 }
@@ -987,6 +1038,7 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
     const std::vector<MotionSegment>& segments, const ros::WallTime& deadline) {
   CandidateResult result;
   result.support_points = CountSupportPoints(segments);
+  result.segments = segments;
 
   SegmentCache cache;
   std::vector<Trajectory> segment_trajectories(segments.size());
@@ -1011,69 +1063,125 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
     return feasible;
   };
 
-  const ros::WallTime segment_solve_start = ros::WallTime::now();
+  std::vector<size_t> high_risk_indices;
+  std::vector<size_t> low_risk_indices;
+  high_risk_indices.reserve(segments.size());
+  low_risk_indices.reserve(segments.size());
   for (size_t i = 0; i < segments.size(); ++i) {
+    if (segments[i].risk == RiskLevel::HIGH) {
+      high_risk_indices.push_back(i);
+    } else {
+      low_risk_indices.push_back(i);
+    }
+  }
+  high_risk_segments = static_cast<int>(high_risk_indices.size());
+
+  auto collect_local_upgrade_indices =
+      [&](const Trajectory& traj, ClearanceProbe* worst_probe) {
+        std::vector<size_t> indices;
+        if (traj.empty() || segments.empty()) {
+          return indices;
+        }
+
+        const ClearanceProbe worst = FindWorstClearanceSample(traj, svsdf_evaluator_);
+        if (worst_probe != nullptr) {
+          *worst_probe = worst;
+        }
+        if (!worst.valid) {
+          return indices;
+        }
+
+        const size_t culprit_index =
+            SegmentIndexFromTime(segment_trajectories, worst.time);
+        const size_t last_index = segments.size() - 1;
+        for (size_t radius = 0; radius <= 2 && indices.empty(); ++radius) {
+          const size_t begin = culprit_index > radius ? culprit_index - radius : 0;
+          const size_t end = std::min(last_index, culprit_index + radius);
+          for (size_t i = begin; i <= end; ++i) {
+            if (segments[i].risk == RiskLevel::LOW && !escalated[i]) {
+              indices.push_back(i);
+            }
+          }
+        }
+        return indices;
+      };
+
+  const ros::WallTime segment_solve_start = ros::WallTime::now();
+  const auto solve_high_risk_segment = [&](size_t i) -> bool {
+    if (segments[i].waypoints.size() < 2) {
+      return false;
+    }
+    ROS_INFO("Runtime stage: solving high-risk segment %zu with strict SE(2), points=%zu",
+             i, segments[i].waypoints.size());
+    Trajectory segment_traj;
+    if (!SolveStrictCached(i, segments[i].waypoints, &segment_traj, cache)) {
+      ROS_WARN("Strict SE(2) solve failed on high-risk segment %zu", i);
+      return false;
+    }
+    if (segment_traj.empty()) {
+      ROS_WARN("Segment %zu optimization failed (risk=HIGH, points=%zu)", i,
+               segments[i].waypoints.size());
+      return false;
+    }
+    ROS_INFO("Segment %zu optimized, risk=HIGH, duration=%f", i,
+             segment_traj.totalDuration());
+    segment_trajectories[i] = segment_traj;
+    return true;
+  };
+  const auto solve_low_risk_segment = [&](size_t i) -> bool {
+    if (segments[i].waypoints.size() < 2) {
+      return false;
+    }
+    const double seg_time = EstimateSegmentTime(segments[i].waypoints);
+    ROS_INFO("Runtime stage: solving low-risk segment %zu in R^2, points=%zu",
+             i, segments[i].waypoints.size());
+    Trajectory segment_traj;
+    if (!OptimizeLowRiskCached(i, segments[i].waypoints, seg_time, &segment_traj,
+                               cache)) {
+      ROS_WARN("Low-risk segment %zu failed in both R^2 and strict SE(2)", i);
+      return false;
+    }
+    if (segment_traj.empty()) {
+      ROS_WARN("Segment %zu optimization failed (risk=LOW, points=%zu)", i,
+               segments[i].waypoints.size());
+      return false;
+    }
+    ROS_INFO("Segment %zu optimized, risk=LOW, duration=%f", i,
+             segment_traj.totalDuration());
+    segment_trajectories[i] = segment_traj;
+    return true;
+  };
+
+  for (size_t i : high_risk_indices) {
     if (DeadlineExpired(deadline)) {
       result.segment_solve_time =
           (ros::WallTime::now() - segment_solve_start).toSec();
-      mark_budget_exhausted("segment solve");
+      mark_budget_exhausted("high-risk segment solve");
       return result;
     }
-    if (segments[i].waypoints.size() < 2) {
+    if (!solve_high_risk_segment(i)) {
       result.segment_solve_time =
           (ros::WallTime::now() - segment_solve_start).toSec();
       return CandidateResult();
     }
+  }
 
-    const double seg_time = EstimateSegmentTime(segments[i].waypoints);
-    Trajectory segment_traj;
-    if (segments[i].risk == RiskLevel::HIGH) {
-      ++high_risk_segments;
-      ROS_INFO("Runtime stage: solving high-risk segment %zu with strict SE(2), points=%zu",
-               i, segments[i].waypoints.size());
-      if (!SolveStrictCached(i, segments[i].waypoints, &segment_traj, cache)) {
-        ROS_WARN("Strict SE(2) solve failed on high-risk segment %zu", i);
-        result.segment_solve_time =
-            (ros::WallTime::now() - segment_solve_start).toSec();
-        return CandidateResult();
-      }
-    } else {
-      ROS_INFO("Runtime stage: solving low-risk segment %zu in R^2, points=%zu",
-               i, segments[i].waypoints.size());
-      if (!OptimizeLowRiskCached(i, segments[i].waypoints, seg_time, &segment_traj,
-                                 cache)) {
-        ROS_WARN("Low-risk segment %zu failed in both R^2 and strict SE(2)", i);
-        result.segment_solve_time =
-            (ros::WallTime::now() - segment_solve_start).toSec();
-        return CandidateResult();
-      }
-      double segment_clearance = -kInf;
-      if (!IsTrajectoryFeasible(segment_traj, &segment_clearance, nullptr, nullptr)) {
-        if (!SolveStrictCached(i, segments[i].waypoints, &segment_traj, cache)) {
-          ROS_WARN("Low-risk segment %zu escalation to strict SE(2) failed", i);
-          result.segment_solve_time =
-              (ros::WallTime::now() - segment_solve_start).toSec();
-          return CandidateResult();
-        }
-        escalated[i] = true;
-        ++result.escalated_segments;
-      }
+  for (size_t i : low_risk_indices) {
+    if (DeadlineExpired(deadline)) {
+      result.segment_solve_time =
+          (ros::WallTime::now() - segment_solve_start).toSec();
+      mark_budget_exhausted("low-risk segment solve");
+      return result;
     }
-    if (segment_traj.empty()) {
-      ROS_WARN("Segment %zu optimization failed (risk=%s, points=%zu)", i,
-               segments[i].risk == RiskLevel::HIGH ? "HIGH" : "LOW",
-               segments[i].waypoints.size());
+    if (!solve_low_risk_segment(i)) {
       result.segment_solve_time =
           (ros::WallTime::now() - segment_solve_start).toSec();
       return CandidateResult();
     }
-    ROS_INFO("Segment %zu optimized, risk=%s, duration=%f", i,
-             segments[i].risk == RiskLevel::HIGH ? "HIGH" : "LOW",
-             segment_traj.totalDuration());
-    segment_trajectories[i] = segment_traj;
   }
   result.segment_solve_time =
       (ros::WallTime::now() - segment_solve_start).toSec();
+  result.segment_trajectories = segment_trajectories;
 
   if (DeadlineExpired(deadline)) {
     mark_budget_exhausted("pre-feasibility");
@@ -1092,80 +1200,99 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
   double max_vel = 0.0;
   double max_acc = 0.0;
   if (!evaluate_full_trajectory(full_traj, &min_clearance, &max_vel, &max_acc)) {
-    for (size_t i = 0; i < segments.size(); ++i) {
-      if (DeadlineExpired(deadline)) {
-        mark_budget_exhausted("low-risk escalation");
-        result.trajectory = full_traj;
-        result.min_clearance = min_clearance;
-        result.max_vel = max_vel;
-        result.max_acc = max_acc;
-        result.high_risk_segments = high_risk_segments;
-        result.degraded = true;
-        return result;
-      }
-      if (segments[i].risk == RiskLevel::LOW && !escalated[i]) {
-        if (!SolveStrictCached(i, segments[i].waypoints, &segment_trajectories[i],
-                               cache)) {
-          ROS_WARN("Low-risk segment %zu final strict SE(2) upgrade failed", i);
+    Trajectory upgraded_full_traj = full_traj;
+    double upgraded_min_clearance = min_clearance;
+    double upgraded_max_vel = max_vel;
+    double upgraded_max_acc = max_acc;
+    ClearanceProbe bottleneck;
+    const std::vector<size_t> local_upgrade_indices =
+        collect_local_upgrade_indices(full_traj, &bottleneck);
+    const size_t bottleneck_index =
+        bottleneck.valid ? SegmentIndexFromTime(segment_trajectories, bottleneck.time) : 0;
+
+    if (!local_upgrade_indices.empty()) {
+      const ros::WallTime escalation_start = ros::WallTime::now();
+      for (size_t i : local_upgrade_indices) {
+        if (DeadlineExpired(deadline)) {
+          mark_budget_exhausted("localized low-risk escalation");
+          result.trajectory = upgraded_full_traj;
+          result.min_clearance = upgraded_min_clearance;
+          result.max_vel = upgraded_max_vel;
+          result.max_acc = upgraded_max_acc;
+          result.high_risk_segments = high_risk_segments;
+          result.segment_trajectories = segment_trajectories;
+          result.degraded = true;
+          return result;
+        }
+        if (!SolveStrictCached(i, segments[i].waypoints, &segment_trajectories[i], cache)) {
+          ROS_WARN("Localized low-risk strict upgrade failed on segment %zu", i);
           return CandidateResult();
         }
         escalated[i] = true;
         ++result.escalated_segments;
       }
-    }
+      result.segment_solve_time +=
+          (ros::WallTime::now() - escalation_start).toSec();
 
-    const Trajectory strict_full_traj =
-        optimizer_.stitch(segments, segment_trajectories);
-    double strict_min_clearance = -kInf;
-    double strict_max_vel = 0.0;
-    double strict_max_acc = 0.0;
-    if (!strict_full_traj.empty() &&
-        evaluate_full_trajectory(strict_full_traj, &strict_min_clearance,
-                                 &strict_max_vel, &strict_max_acc)) {
-      result.trajectory = strict_full_traj;
-      result.min_clearance = strict_min_clearance;
-      result.max_vel = strict_max_vel;
-      result.max_acc = strict_max_acc;
-      result.high_risk_segments = high_risk_segments;
-      if (DeadlineExpired(deadline)) {
-        result.budget_exhausted = true;
+      ROS_INFO(
+          "Localized strict upgrade around bottleneck: culprit_seg=%zu clearance=%.3f upgraded_low=%zu window=[%zu,%zu]",
+          bottleneck_index, bottleneck.clearance, local_upgrade_indices.size(),
+          local_upgrade_indices.front(), local_upgrade_indices.back());
+
+      result.segment_trajectories = segment_trajectories;
+      upgraded_full_traj = optimizer_.stitch(segments, segment_trajectories);
+      upgraded_min_clearance = -kInf;
+      upgraded_max_vel = 0.0;
+      upgraded_max_acc = 0.0;
+      if (!upgraded_full_traj.empty() &&
+          evaluate_full_trajectory(upgraded_full_traj, &upgraded_min_clearance,
+                                   &upgraded_max_vel, &upgraded_max_acc)) {
+        result.trajectory = upgraded_full_traj;
+        result.min_clearance = upgraded_min_clearance;
+        result.max_vel = upgraded_max_vel;
+        result.max_acc = upgraded_max_acc;
+        result.high_risk_segments = high_risk_segments;
+        result.segment_trajectories = segment_trajectories;
+        if (DeadlineExpired(deadline)) {
+          result.budget_exhausted = true;
+        }
         return result;
       }
-      const ros::WallTime tail_start = ros::WallTime::now();
-      MaybeImproveTailTrajectory(segments, segment_trajectories, deadline, &result);
-      result.tail_refine_time += (ros::WallTime::now() - tail_start).toSec();
-      if (DeadlineExpired(deadline)) {
-        result.budget_exhausted = true;
-      }
-      return result;
+    } else {
+      ROS_WARN(
+          "No local low-risk segments found near bottleneck: culprit_seg=%zu clearance=%.3f; skipping blanket strict escalation",
+          bottleneck_index, bottleneck.clearance);
     }
 
     if (DeadlineExpired(deadline)) {
       mark_budget_exhausted("recovery setup");
-      result.trajectory = strict_full_traj;
-      result.min_clearance = strict_min_clearance;
-      result.max_vel = strict_max_vel;
-      result.max_acc = strict_max_acc;
+      result.trajectory = upgraded_full_traj;
+      result.min_clearance = upgraded_min_clearance;
+      result.max_vel = upgraded_max_vel;
+      result.max_acc = upgraded_max_acc;
       result.high_risk_segments = high_risk_segments;
+      result.segment_trajectories = segment_trajectories;
       result.degraded = true;
       return result;
     }
 
     const ros::WallTime recovery_start = ros::WallTime::now();
-    if (TryRecoverBottleneck(segments, segment_trajectories, strict_full_traj, deadline,
-                             &result)) {
+    if (TryRecoverBottleneck(segments, segment_trajectories, upgraded_full_traj,
+                             deadline, &result)) {
       result.recovery_time += (ros::WallTime::now() - recovery_start).toSec();
+      result.segment_trajectories = segment_trajectories;
       return result;
     }
     result.recovery_time += (ros::WallTime::now() - recovery_start).toSec();
 
     ROS_WARN("Path degraded after local recovery failure (clearance=%.3f)",
-             strict_min_clearance);
-    result.trajectory = strict_full_traj;
-    result.min_clearance = strict_min_clearance;
-    result.max_vel = strict_max_vel;
-    result.max_acc = strict_max_acc;
+             upgraded_min_clearance);
+    result.trajectory = upgraded_full_traj;
+    result.min_clearance = upgraded_min_clearance;
+    result.max_vel = upgraded_max_vel;
+    result.max_acc = upgraded_max_acc;
     result.high_risk_segments = high_risk_segments;
+    result.segment_trajectories = segment_trajectories;
     result.degraded = true;
     return result;
   }
@@ -1175,14 +1302,7 @@ SvsdfRuntime::CandidateResult SvsdfRuntime::EvaluateCandidate(
   result.max_vel = max_vel;
   result.max_acc = max_acc;
   result.high_risk_segments = high_risk_segments;
-  if (DeadlineExpired(deadline)) {
-    result.budget_exhausted = true;
-    return result;
-  }
-
-  const ros::WallTime tail_start = ros::WallTime::now();
-  MaybeImproveTailTrajectory(segments, segment_trajectories, deadline, &result);
-  result.tail_refine_time += (ros::WallTime::now() - tail_start).toSec();
+  result.segment_trajectories = segment_trajectories;
   if (DeadlineExpired(deadline)) {
     result.budget_exhausted = true;
   }
@@ -1208,7 +1328,18 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
 
   CandidateResult best = *result;
   double best_length = ApproximateTrajectoryLength(best.trajectory);
-  const size_t max_suffix_segments = std::min<size_t>(6, segment_count);
+  const double clearance_target = std::max(0.08, optimizer_params_.safety_margin);
+  const size_t piece_trigger = std::max<size_t>(180, 9 * segment_count);
+  if (best.min_clearance >= clearance_target &&
+      best.trajectory.pos_pieces.size() <= piece_trigger) {
+    ROS_INFO(
+        "Tail refinement skipped: clearance %.3f >= %.3f and pieces %zu <= %zu",
+        best.min_clearance, clearance_target, best.trajectory.pos_pieces.size(),
+        piece_trigger);
+    return;
+  }
+
+  const size_t max_suffix_segments = std::min<size_t>(4, segment_count);
   const size_t first_suffix_index =
       segment_count > max_suffix_segments ? segment_count - max_suffix_segments : 0;
 
@@ -1227,18 +1358,20 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
     result->budget_exhausted = true;
     return;
   }
-  double tail_time_budget_sec = 2.0;
+  double tail_time_budget_sec = 0.35;
   if (std::isfinite(remaining_budget_sec)) {
     tail_time_budget_sec =
-        std::min(2.0, std::min(remaining_budget_sec,
-                               std::max(0.25, 0.35 * remaining_budget_sec)));
+        std::min(0.50, std::min(remaining_budget_sec,
+                                std::max(0.10, 0.12 * remaining_budget_sec)));
   }
   const ros::WallTime local_tail_deadline =
       tail_start + ros::WallDuration(tail_time_budget_sec);
   const int max_tail_attempts =
-      std::min<int>(8, std::max<int>(3, 2 * static_cast<int>(max_suffix_segments)));
+      std::min<int>(4, std::max<int>(2, static_cast<int>(max_suffix_segments)));
   int tail_attempts = 0;
   int tail_pruned = 0;
+  int consecutive_no_improvement = 0;
+  const int max_consecutive_no_improvement = 3;
   bool improved = false;
   bool stop_after_accept = false;
   bool local_budget_exhausted = false;
@@ -1255,11 +1388,16 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
     return false;
   };
 
+  auto record_no_improvement = [&]() {
+    ++consecutive_no_improvement;
+  };
+
   auto maybe_accept_suffix =
       [&](size_t start_index, const std::vector<SE2State>& suffix_waypoints,
           bool use_strict, const char* label) {
         if (suffix_waypoints.size() < 2 || stop_after_accept || tail_timed_out() ||
-            tail_attempts >= max_tail_attempts) {
+            tail_attempts >= max_tail_attempts ||
+            consecutive_no_improvement >= max_consecutive_no_improvement) {
           return;
         }
 
@@ -1270,6 +1408,7 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
             use_strict ? SolveStrictSegment(suffix_waypoints, &suffix_traj)
                        : OptimizeLowRiskSegment(suffix_waypoints, seg_time, &suffix_traj);
         if (!solved || suffix_traj.empty()) {
+          record_no_improvement();
           return;
         }
 
@@ -1281,12 +1420,13 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
             svsdf_evaluator_.segmentClearance(suffix_waypoints, 0.10);
         const bool can_improve_clearance =
             std::isfinite(raw_suffix_clearance) &&
-            raw_suffix_clearance > best.min_clearance + 1e-3;
+            raw_suffix_clearance > best.min_clearance + 5e-3;
         const bool can_improve_geometry =
-            candidate_piece_estimate + 1 < best.trajectory.pos_pieces.size() ||
-            candidate_length_estimate + 0.25 < best_length;
+            candidate_piece_estimate + 3 < best.trajectory.pos_pieces.size() ||
+            candidate_length_estimate + 0.75 < best_length;
         if (!can_improve_clearance && !can_improve_geometry) {
           ++tail_pruned;
+          record_no_improvement();
           return;
         }
         if (tail_timed_out()) {
@@ -1299,18 +1439,20 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
         double max_vel = 0.0;
         double max_acc = 0.0;
         if (!IsTrajectoryFeasible(candidate_traj, &min_clearance, &max_vel, &max_acc)) {
+          record_no_improvement();
           return;
         }
 
         const double candidate_length = ApproximateTrajectoryLength(candidate_traj);
         const size_t candidate_pieces = candidate_traj.pos_pieces.size();
-        const bool better_clearance = min_clearance > best.min_clearance + 1e-3;
-        const bool clearance_not_worse = min_clearance + 1e-3 >= best.min_clearance;
+        const bool better_clearance = min_clearance > best.min_clearance + 5e-3;
+        const bool clearance_not_worse = min_clearance + 2e-3 >= best.min_clearance;
         const bool better_geometry =
-            candidate_pieces + 1 < best.trajectory.pos_pieces.size() ||
-            candidate_length + 0.25 < best_length;
+            candidate_pieces + 3 < best.trajectory.pos_pieces.size() ||
+            candidate_length + 0.75 < best_length;
 
         if (!better_clearance && !(clearance_not_worse && better_geometry)) {
+          record_no_improvement();
           return;
         }
 
@@ -1338,19 +1480,23 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
             CountHighRiskSegments(segments, start_index) + (use_strict ? 1 : 0);
         best_length = candidate_length;
         improved = true;
+        consecutive_no_improvement = 0;
 
         const bool strong_improvement =
             min_clearance > previous_best_clearance + 1e-2 ||
-            candidate_pieces + 4 < previous_best_pieces ||
-            candidate_length + 1.0 < previous_best_length;
+            candidate_pieces + 5 < previous_best_pieces ||
+            candidate_length + 1.5 < previous_best_length;
         if (strong_improvement) {
           stop_after_accept = true;
         }
       };
 
-  for (size_t start_index = first_suffix_index; start_index + 1 < segment_count;
-       ++start_index) {
-    if (stop_after_accept || tail_timed_out() || tail_attempts >= max_tail_attempts) {
+  for (size_t start_index = segment_count - 2;; --start_index) {
+    if (start_index < first_suffix_index) {
+      break;
+    }
+    if (stop_after_accept || tail_timed_out() || tail_attempts >= max_tail_attempts ||
+        consecutive_no_improvement >= max_consecutive_no_improvement) {
       break;
     }
 
@@ -1362,30 +1508,16 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
       AppendUniqueWaypoints(segments[i].waypoints, &merged_suffix);
     }
 
-    if (merged_suffix.size() < 2) {
-      continue;
-    }
-
-    const size_t suffix_segment_count = segment_count - start_index;
-    const double suffix_length = WaypointPathLength(merged_suffix);
-    const double suffix_chord =
-        (merged_suffix.back().position() - merged_suffix.front().position()).norm();
-
-    if (suffix_segment_count >= 2) {
+    if (merged_suffix.size() >= 2) {
       maybe_accept_suffix(start_index, merged_suffix, false, "merged_suffix_r2");
-      if (suffix_has_high) {
+      if (suffix_has_high && !stop_after_accept &&
+          consecutive_no_improvement < max_consecutive_no_improvement) {
         maybe_accept_suffix(start_index, merged_suffix, true, "merged_suffix_strict");
       }
     }
 
-    if (suffix_chord > 2.0 && suffix_length > 1.10 * suffix_chord) {
-      const std::vector<SE2State> direct_suffix =
-          BuildLinearWaypoints(merged_suffix.front(), merged_suffix.back(),
-                               se2_disc_step_);
-      maybe_accept_suffix(start_index, direct_suffix, false, "direct_suffix_r2");
-      if (suffix_has_high) {
-        maybe_accept_suffix(start_index, direct_suffix, true, "direct_suffix_strict");
-      }
+    if (start_index == first_suffix_index) {
+      break;
     }
   }
 
@@ -1405,6 +1537,7 @@ void SvsdfRuntime::MaybeImproveTailTrajectory(
 }
 
 bool SvsdfRuntime::TryRecoverBottleneck(
+
     const std::vector<MotionSegment>& segments,
     const std::vector<Trajectory>& segment_trajectories, const Trajectory& current_traj,
     const ros::WallTime& deadline, CandidateResult* result) {
@@ -2499,7 +2632,28 @@ nav_msgs::Path SvsdfRuntime::MakeTrajectoryPath(const Trajectory& traj) const {
     ROS_INFO("MakeTrajectoryPath: start=(%.3f,%.3f,%.3f) end=(%.3f,%.3f,%.3f)",
              s0.x, s0.y, s0.yaw, sf.x, sf.y, sf.yaw);
   }
-  for (double t = 0.0; t <= total; t += 0.05) {
+
+  const double min_sample_dt = 0.05;
+  const double max_sample_dt = 0.40;
+  const size_t min_pose_count = 1000;
+  const size_t max_pose_count = 2500;
+  const size_t target_pose_count =
+      std::max(min_pose_count,
+               std::min(max_pose_count,
+                        traj.pos_pieces.size() * static_cast<size_t>(2)));
+  const double sample_dt =
+      total > 1e-9
+          ? std::min(max_sample_dt,
+                     std::max(min_sample_dt,
+                              total / static_cast<double>(target_pose_count)))
+          : min_sample_dt;
+  const size_t estimated_pose_count =
+      total > 1e-9 ? static_cast<size_t>(std::ceil(total / sample_dt)) + 1 : 1;
+  path.poses.reserve(estimated_pose_count);
+  ROS_INFO("MakeTrajectoryPath: sample_dt=%.3f target_poses=%zu estimated_poses=%zu",
+           sample_dt, target_pose_count, estimated_pose_count);
+
+  for (double t = 0.0; t < total; t += sample_dt) {
     const SE2State state = traj.sample(t);
     geometry_msgs::PoseStamped pose;
     pose.header = path.header;
@@ -2509,6 +2663,15 @@ nav_msgs::Path SvsdfRuntime::MakeTrajectoryPath(const Trajectory& traj) const {
     pose.pose.orientation.w = std::cos(state.yaw * 0.5);
     path.poses.push_back(pose);
   }
+
+  const SE2State final_state = traj.sample(total);
+  geometry_msgs::PoseStamped final_pose;
+  final_pose.header = path.header;
+  final_pose.pose.position.x = final_state.x;
+  final_pose.pose.position.y = final_state.y;
+  final_pose.pose.orientation.z = std::sin(final_state.yaw * 0.5);
+  final_pose.pose.orientation.w = std::cos(final_state.yaw * 0.5);
+  path.poses.push_back(final_pose);
   return path;
 }
 

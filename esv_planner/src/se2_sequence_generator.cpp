@@ -53,14 +53,74 @@ bool IsHighRiskConfiguration(const GridMap& map, const CollisionChecker& checker
   const int assigned_bin = checker.binFromYaw(assigned.yaw);
   const int yaw_distance = WrappedBinDistance(desired_bin, assigned_bin, bins);
 
-  const double high_risk_clearance =
+  const double critical_clearance =
+      std::max(2.0 * checker.footprint().inscribedRadius(),
+               1.35 * checker.footprint().circumscribedRadius());
+  const double caution_clearance =
       std::max(2.5 * checker.footprint().inscribedRadius(),
-               2.0 * checker.footprint().circumscribedRadius());
-  const int safe_yaw_threshold =
-      std::max(2, static_cast<int>(std::ceil(0.75 * static_cast<double>(bins))));
+               1.65 * checker.footprint().circumscribedRadius());
+  const int constrained_yaw_threshold =
+      std::max(2, static_cast<int>(std::ceil(0.30 * static_cast<double>(bins))));
+  const int limited_yaw_threshold =
+      std::max(3, static_cast<int>(std::ceil(0.45 * static_cast<double>(bins))));
 
-  return esdf < high_risk_clearance || safe_count <= safe_yaw_threshold ||
-         yaw_distance > 3;
+  const bool severe_clearance = !std::isfinite(esdf) || esdf < critical_clearance;
+  const bool caution_clearance_hit = esdf < caution_clearance;
+  const bool constrained_yaw = safe_count <= constrained_yaw_threshold;
+  const bool limited_yaw = safe_count <= limited_yaw_threshold;
+  const bool strong_yaw_mismatch = yaw_distance > 4;
+
+  return severe_clearance || constrained_yaw ||
+         (caution_clearance_hit && (limited_yaw || strong_yaw_mismatch));
+}
+
+ double AdaptiveDiscretizationStep(const GridMap& map, double base_step,
+                                  const Eigen::Vector2d& start,
+                                  const Eigen::Vector2d& goal) {
+  const Eigen::Vector2d midpoint = 0.5 * (start + goal);
+  const double min_clearance = std::min(
+      map.getEsdf(start.x(), start.y()),
+      std::min(map.getEsdf(goal.x(), goal.y()),
+               map.getEsdf(midpoint.x(), midpoint.y())));
+  const double tight_clearance = std::max(0.40, 3.0 * map.resolution());
+  const double open_clearance = std::max(1.20, 8.0 * map.resolution());
+  if (!std::isfinite(min_clearance) || min_clearance <= tight_clearance) {
+    return std::max(0.75 * base_step, 0.75 * map.resolution());
+  }
+  if (min_clearance >= open_clearance) {
+    return std::max(2.25 * base_step, 1.50 * map.resolution());
+  }
+  const double ratio = (min_clearance - tight_clearance) /
+                       std::max(1e-6, open_clearance - tight_clearance);
+  const double scale = 0.75 + 1.50 * ratio;
+  return std::max(scale * base_step, 0.75 * map.resolution());
+}
+
+void MergeAdjacentLowRiskSegments(std::vector<MotionSegment>* segments) {
+  if (segments == nullptr || segments->empty()) {
+    return;
+  }
+
+  std::vector<MotionSegment> merged;
+  merged.reserve(segments->size());
+  merged.push_back((*segments)[0]);
+  for (size_t i = 1; i < segments->size(); ++i) {
+    const MotionSegment& current = (*segments)[i];
+    MotionSegment& back = merged.back();
+    if (back.risk != RiskLevel::LOW || current.risk != RiskLevel::LOW) {
+      merged.push_back(current);
+      continue;
+    }
+
+    const size_t begin = (!back.waypoints.empty() && !current.waypoints.empty() &&
+                          (back.waypoints.back().position() -
+                           current.waypoints.front().position()).norm() < 1e-6)
+                             ? 1
+                             : 0;
+    back.waypoints.insert(back.waypoints.end(), current.waypoints.begin() + begin,
+                          current.waypoints.end());
+  }
+  segments->swap(merged);
 }
 
 struct FootprintClearanceProbe {
@@ -132,7 +192,11 @@ std::vector<SE2State> SE2SequenceGenerator::discretizePath(const TopoPath& path,
       tangent_yaw = path.waypoints[i].yaw;
     }
 
-    const int samples = std::max(1, static_cast<int>(std::ceil(segment_length / disc_step_)));
+    const double local_step =
+        AdaptiveDiscretizationStep(*map_, disc_step_, path.waypoints[i - 1].pos,
+                                   path.waypoints[i].pos);
+    const int samples =
+        std::max(1, static_cast<int>(std::ceil(segment_length / local_step)));
     for (int s = 1; s <= samples; ++s) {
       const double t = static_cast<double>(s) / static_cast<double>(samples);
       const Eigen::Vector2d position = path.waypoints[i - 1].pos + t * delta;
@@ -408,6 +472,7 @@ std::vector<MotionSegment> SE2SequenceGenerator::generate(const TopoPath& path,
     segments.push_back(current);
   }
 
+  MergeAdjacentLowRiskSegments(&segments);
   return segments;
 }
 

@@ -342,8 +342,7 @@ void TopologyPlanner::rebuildBaseRoadmap() {
     const double x = x_min + HaltonSequence(i, 2) * (x_max - x_min);
     const double y = y_min + HaltonSequence(i, 3) * (y_max - y_min);
     const double node_clearance = inscribed_radius_ + map_->resolution();
-    if (map_->getEsdf(x, y) > node_clearance &&
-        checker_->hasAnySafeYaw(x, y)) {
+    if (map_->getEsdf(x, y) > node_clearance) {
       base_nodes_.push_back(Eigen::Vector2d(x, y));
       ++accepted;
     }
@@ -637,10 +636,6 @@ bool TopologyPlanner::lineCollisionFree(const Eigen::Vector2d& a, const Eigen::V
       return false;
     }
   }
-  const Eigen::Vector2d midpoint = 0.5 * (a + b);
-  if (!checker_->hasAnySafeYaw(midpoint.x(), midpoint.y())) {
-    return false;
-  }
   return true;
 }
 
@@ -901,8 +896,7 @@ bool TopologyPlanner::isTopologicallyDistinct(
       for (int s = 0; s <= checks; ++s) {
         const double t = static_cast<double>(s) / static_cast<double>(checks);
         const Eigen::Vector2d point = p1 + t * (p2 - p1);
-        if (map_->getEsdf(point.x(), point.y()) < clearance_margin ||
-            !checker_->hasAnySafeYaw(point.x(), point.y())) {
+        if (map_->getEsdf(point.x(), point.y()) < clearance_margin) {
           equivalent = false;
           break;
         }

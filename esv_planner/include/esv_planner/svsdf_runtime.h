@@ -38,6 +38,8 @@ class SvsdfRuntime {
  private:
   struct CandidateResult {
     Trajectory trajectory;
+    std::vector<MotionSegment> segments;
+    std::vector<Trajectory> segment_trajectories;
     double min_clearance = -kInf;
     double max_vel = 0.0;
     double max_acc = 0.0;
