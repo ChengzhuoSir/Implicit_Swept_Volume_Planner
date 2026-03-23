@@ -1,0 +1,25 @@
+<launch>
+  <!-- Optional map_server:
+       set use_map_server:=true when ros-noetic-map-server is installed
+       and you want to load the bundled office map -->
+  <arg name="use_map_server" default="false" />
+  <arg name="map_file" default="$(find isweep_planner)/maps/map.yaml" />
+  <arg name="strict_rebuild_case" default="" />
+  <arg name="use_start_goal_params" default="false" />
+  <node if="$(arg use_map_server)"
+        name="map_server"
+        pkg="map_server"
+        type="map_server"
+        args="$(arg map_file)"
+        required="false" />
+
+  <!-- iSweep Planner -->
+  <include file="$(find isweep_planner)/launch/planner.launch">
+    <arg name="strict_rebuild_case" value="$(arg strict_rebuild_case)" />
+    <arg name="use_start_goal_params" value="$(arg use_start_goal_params)" />
+  </include>
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find isweep_planner)/config/demo.rviz"
+        required="false" />
+</launch>

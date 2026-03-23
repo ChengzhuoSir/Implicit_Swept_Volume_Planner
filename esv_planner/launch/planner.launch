@@ -1,9 +1,0 @@
-<launch>
-  <arg name="strict_rebuild_case" default="" />
-  <arg name="use_start_goal_params" default="true" />
-  <node name="esv_planner" pkg="esv_planner" type="esv_planner_node" output="screen">
-    <rosparam file="$(find esv_planner)/config/planner.yaml" command="load" />
-    <param name="strict_rebuild_case" value="$(arg strict_rebuild_case)" />
-    <param name="use_start_goal_params" value="$(arg use_start_goal_params)" />
-  </node>
-</launch>

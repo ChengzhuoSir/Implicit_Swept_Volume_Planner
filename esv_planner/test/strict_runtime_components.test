@@ -1,6 +1,0 @@
-<launch>
-  <test test-name="strict_runtime_components_test"
-        pkg="esv_planner"
-        type="strict_runtime_components_test"
-        time-limit="60" />
-</launch>

@@ -1,0 +1,9 @@
+<launch>
+  <arg name="strict_rebuild_case" default="" />
+  <arg name="use_start_goal_params" default="true" />
+  <node name="isweep_planner" pkg="isweep_planner" type="isweep_planner_node" output="screen">
+    <rosparam file="$(find isweep_planner)/config/planner.yaml" command="load" />
+    <param name="strict_rebuild_case" value="$(arg strict_rebuild_case)" />
+    <param name="use_start_goal_params" value="$(arg use_start_goal_params)" />
+  </node>
+</launch>
