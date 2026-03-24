@@ -77,13 +77,6 @@ void SvsdfEvaluator::initGridEsdf(const GridMap& map,
   geometry_map_ = &map.geometryMap();
 }
 
-void SvsdfEvaluator::initGeometryBodyFrame(const GeometryMap& geometry_map,
-                                            const FootprintModel& footprint) {
-  mode_ = Backend::GeometryBodyFrame;
-  geometry_map_ = &geometry_map;
-  footprint_ = &footprint;
-}
-
 // --- Core evaluate dispatch ---
 
 double SvsdfEvaluator::evaluate(const SE2State& state) const {

@@ -112,8 +112,6 @@ public:
     void drawDebug();
     void writeIterTraj(int index);
 
-    void renderAABBpoints();
-
     inline Eigen::Matrix3d getQuatTransDW(const Eigen::Vector4d &quat)
     { 
         Eigen::Matrix3d ret;
@@ -980,12 +978,9 @@ public:
     void setEnvironment(SweptVolumeManager::Ptr sv) { sv_manager = sv; }
     void setGridMap(PCSmapManager::Ptr psm) { pcsmap_manager = psm; }
 
-    void clearvisAABBpoints();
-   
 
 
-    int optimize_traj_lmbm(const Eigen::Matrix3d &initS,
-                       const Eigen::Matrix3d &finalS,
+    int optimize_traj_lmbm(const Eigen::Matrix3d &initS,                       const Eigen::Matrix3d &finalS,
                        Eigen::VectorXd &opt_x,
                        const int N,
                        Trajectory<TRAJ_ORDER> &traj);

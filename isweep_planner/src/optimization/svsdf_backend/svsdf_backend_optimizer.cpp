@@ -107,23 +107,3 @@ void TrajOptimizer::drawDebug()
 {
   vis->visTraj("step_traj", step_traj, 114515,true);
 }
-
-void TrajOptimizer::renderAABBpoints()
-{
- vector<Vector3d> aabbpoints;
-for (const auto &b: pcsmap_manager -> aabb_points)
-{
-    aabbpoints.emplace_back(b.second);
-}
-vis->visPointcloudByVector(aabbpoints,"aabbpoints");
-}
-
-
-void TrajOptimizer::clearvisAABBpoints()
-{
-  visualization_msgs::MarkerArray mk;
-  visualization_msgs::Marker marker;
-  marker.action = visualization_msgs::Marker::DELETEALL;
-  mk.markers.emplace_back(marker);
-  debug_wplists_pub.publish(mk);
-}

@@ -24,14 +24,6 @@ void FootprintModel::computeCircumscribedRadius() {
   }
 }
 
-double FootprintModel::bodyFrameSdf(const Eigen::Vector2d& point) const {
-  return body_frame_sdf_.signedDistance(point);
-}
-
-BodyFrameQuery FootprintModel::bodyFrameQuery(const Eigen::Vector2d& point) const {
-  return body_frame_sdf_.query(point);
-}
-
 std::vector<Eigen::Vector2d> FootprintModel::rotatedVertices(double yaw) const {
   double c = std::cos(yaw);
   double s = std::sin(yaw);

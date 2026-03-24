@@ -150,12 +150,6 @@ void Se2SvsdfSolver::Initialize(ros::NodeHandle& nh, ros::NodeHandle& pnh,
   ConfigureModules(true);
 }
 
-void Se2SvsdfSolver::InitializeForTesting(const FootprintModel& footprint) {
-  (void)footprint;
-  config_ = BuildDefaultConfig();
-  ConfigureModules(false);
-}
-
 void Se2SvsdfSolver::ConfigureModules(bool enable_ros_io) {
   pcs_map_manager_.reset(new PCSmapManager(config_));
   swept_volume_manager_.reset(new SweptVolumeManager(config_));

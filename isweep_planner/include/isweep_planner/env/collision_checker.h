@@ -26,9 +26,6 @@ public:
   // Convenience: count of safe yaw bins (uses cache)
   int safeYawCount(double wx, double wy) const;
 
-  // Convenience: whether any safe yaw exists (uses cache)
-  bool hasAnySafeYaw(double wx, double wy) const;
-
   // Check if a specific yaw bin is safe at (wx, wy)
   bool isYawSafe(double wx, double wy, int yaw_bin) const;
 

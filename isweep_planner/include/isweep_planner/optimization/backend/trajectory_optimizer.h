@@ -34,7 +34,6 @@ class TrajectoryOptimizer {
   Trajectory optimizeR2(const std::vector<SE2State>& waypoints, double total_time);
   Trajectory stitch(const std::vector<MotionSegment>& segments,
                     const std::vector<Trajectory>& optimized);
-  Trajectory selectBest(const std::vector<Trajectory>& candidates);
 
  private:
   void fitMincoQuintic(const std::vector<Eigen::Vector2d>& positions,
@@ -48,9 +47,6 @@ class TrajectoryOptimizer {
                      std::vector<YawPolyPiece>& pieces);
   std::vector<double> allocateTime(const std::vector<SE2State>& waypoints,
                                    double total_time);
-  double computeCost(const Trajectory& traj, const std::vector<SE2State>& ref_waypoints,
-                     bool include_svsdf, bool include_residual);
-  bool checkDynamics(const Trajectory& traj);
 
   const GridMap* map_ = nullptr;
   const SvsdfEvaluator* svsdf_ = nullptr;

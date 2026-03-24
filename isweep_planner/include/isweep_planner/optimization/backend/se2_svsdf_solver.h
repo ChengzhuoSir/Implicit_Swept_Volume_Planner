@@ -24,7 +24,6 @@ class Se2SvsdfSolver {
 
   void Initialize(ros::NodeHandle& nh, ros::NodeHandle& pnh,
                   const FootprintModel& footprint);
-  void InitializeForTesting(const FootprintModel& footprint);
   bool UpdateMap(const nav_msgs::OccupancyGrid& map);
   bool Solve(const std::vector<SE2State>& segment, Trajectory* trajectory,
              bool preserve_shape = false);

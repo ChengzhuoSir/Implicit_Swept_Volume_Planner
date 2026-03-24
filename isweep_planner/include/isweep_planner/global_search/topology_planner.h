@@ -26,10 +26,6 @@ class TopologyPlanner {
 
   void buildRoadmap(const Eigen::Vector2d& start, const Eigen::Vector2d& goal);
   std::vector<TopoPath> searchPaths();
-  std::vector<TopoPath> searchPathsAvoidingRegion(const Eigen::Vector2d& center,
-                                                  double radius);
-  std::vector<TopoPath> searchPathsAvoidingCenters(
-      const std::vector<Eigen::Vector2d>& centers, double radius);
   void shortenPaths(std::vector<TopoPath>& paths);
 
  private:

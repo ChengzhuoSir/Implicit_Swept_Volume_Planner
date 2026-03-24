@@ -219,32 +219,6 @@ bool GridMap3D::isIndexOccupied(const Vector3i &index)
     }
 }
 
-bool GridMap3D::isIndexOccupiedFlate(const Vector3i &index, const int flate_pix)
-{
-    Eigen::Vector3i new_ind = index;
-    for (int dx = -flate_pix; dx <= flate_pix; dx++)
-    {
-        for (int dy = -flate_pix; dy <= flate_pix; dy++)
-        {
-            for (int dz = -flate_pix; dz <= flate_pix; dz++)
-            {
-                new_ind(0) = index(0) + dx;
-                new_ind(1) = index(1) + dy;
-                new_ind(2) = index(2) + dz;
-                if (!isIndexValid(new_ind))
-                {
-                    continue;
-                }
-                else if (grid_map[toAddr(new_ind(0),new_ind(1),new_ind(2))]== 1)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 bool GridMap3D::isIndexOccupied(int ix, int iy, int iz)
 {
     bool invalid = false;

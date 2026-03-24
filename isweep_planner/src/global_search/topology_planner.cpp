@@ -501,60 +501,6 @@ std::vector<TopoPath> TopologyPlanner::searchPaths() {
   return searchPathsImpl(blocked_edges, blocked_nodes);
 }
 
-std::vector<TopoPath> TopologyPlanner::searchPathsAvoidingRegion(
-    const Eigen::Vector2d& center, double radius) {
-  return searchPathsAvoidingCenters(std::vector<Eigen::Vector2d>(1, center), radius);
-}
-
-std::vector<TopoPath> TopologyPlanner::searchPathsAvoidingCenters(
-    const std::vector<Eigen::Vector2d>& centers, double radius) {
-  if (centers.empty()) {
-    return searchPaths();
-  }
-
-  std::set<std::pair<int, int>> blocked_edges;
-  std::unordered_set<int> blocked_nodes;
-  const double inflated_radius = radius + map_->resolution();
-  const auto point_blocked = [&](const Eigen::Vector2d& point) {
-    for (const Eigen::Vector2d& center : centers) {
-      if ((point - center).norm() <= inflated_radius) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  for (size_t i = 2; i < nodes_.size(); ++i) {
-    if (point_blocked(nodes_[i])) {
-      blocked_nodes.insert(static_cast<int>(i));
-    }
-  }
-
-  for (size_t i = 0; i < nodes_.size(); ++i) {
-    const auto inspect_edge = [&](int next) {
-      for (const Eigen::Vector2d& center : centers) {
-        if (DistanceToSegment(center, nodes_[i], nodes_[static_cast<size_t>(next)]) <=
-            inflated_radius) {
-          blocked_edges.insert(std::make_pair(static_cast<int>(i), next));
-          break;
-        }
-      }
-    };
-
-    if (i >= 2) {
-      const size_t base_index = i - 2;
-      for (const auto& edge : base_adjacency_[base_index]) {
-        inspect_edge(edge.first + 2);
-      }
-    }
-    for (const auto& edge : adjacency_[i]) {
-      inspect_edge(edge.first);
-    }
-  }
-
-  return searchPathsImpl(blocked_edges, blocked_nodes);
-}
-
 std::vector<TopoPath> TopologyPlanner::searchPathsImpl(
     const std::set<std::pair<int, int>>& blocked_edges,
     const std::unordered_set<int>& blocked_nodes) const {

@@ -16,8 +16,6 @@ public:
   SvsdfEvaluator() = default;
 
   void initGridEsdf(const GridMap& map, const FootprintModel& footprint);
-  void initGeometryBodyFrame(const GeometryMap& geometry_map,
-                             const FootprintModel& footprint);
 
   // Core SVSDF query: minimum signed distance (negative = collision)
   double evaluate(const SE2State& state) const;

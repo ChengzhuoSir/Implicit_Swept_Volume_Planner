@@ -29,35 +29,6 @@ double BodyFrameSdf::signedDistance(const Eigen::Vector2d& point) const {
   return query(point).signed_distance;
 }
 
-BodyFrameSdf::NearestEdgeResult BodyFrameSdf::nearestEdge(
-    const Eigen::Vector2d& point) const {
-  NearestEdgeResult result;
-  if (vertices_.size() < 2) return result;
-
-  for (size_t i = 0; i < vertices_.size(); ++i) {
-    const Eigen::Vector2d& a = vertices_[i];
-    const Eigen::Vector2d& b = vertices_[(i + 1) % vertices_.size()];
-    const Eigen::Vector2d closest = projectToSegment(point, a, b);
-    const double distance = (point - closest).norm();
-    if (distance < result.distance) {
-      result.distance = distance;
-      result.edge_index = i;
-      result.closest_point = closest;
-    }
-  }
-  return result;
-}
-
-Eigen::Vector2d BodyFrameSdf::outwardNormal(size_t edge_index) const {
-  if (vertices_.size() < 2) return Eigen::Vector2d::Zero();
-  const Eigen::Vector2d& a = vertices_[edge_index];
-  const Eigen::Vector2d& b = vertices_[(edge_index + 1) % vertices_.size()];
-  const Eigen::Vector2d edge = b - a;
-  const double len = edge.norm();
-  if (len < 1e-12) return Eigen::Vector2d::Zero();
-  return Eigen::Vector2d(edge.y(), -edge.x()) / len;
-}
-
 std::vector<BodyFrameQuery> BodyFrameSdf::queryBatch(
     const Eigen::Ref<const Eigen::MatrixXd>& points) const {
   std::vector<BodyFrameQuery> result;

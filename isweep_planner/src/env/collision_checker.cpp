@@ -74,10 +74,6 @@ int CollisionChecker::safeYawCount(double wx, double wy) const {
   return static_cast<int>(safeYawIndices(wx, wy).size());
 }
 
-bool CollisionChecker::hasAnySafeYaw(double wx, double wy) const {
-  return !safeYawIndices(wx, wy).empty();
-}
-
 bool CollisionChecker::isYawSafe(double wx, double wy, int yaw_bin) const {
   if (yaw_bin < 0 || yaw_bin >= num_yaw_bins_) return false;
 

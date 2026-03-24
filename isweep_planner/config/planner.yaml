@@ -1,5 +1,8 @@
+# ============================
+# 1. 机器人基础几何与环境配置
+# ============================
 footprint: [0.20, 0.25, 0.20, -0.25, -0.10, -0.25, -0.10, -0.09, -0.30, -0.09, -0.30, 0.09, -0.10, 0.09, -0.10, 0.25]
-inscribed_radius: 0.10
+inscribed_radius: 0.10 # 内切圆半径
 
 startup_wait_for_map: true
 startup_map_wait_timeout: 0.0
@@ -8,36 +11,52 @@ startup_map_wait_poll: 1.0
 meshTopic: "/isweep_planner/mesh"
 edgeTopic: "/isweep_planner/mesh_edges"
 vertexTopic: "/isweep_planner/mesh_vertices"
-inputdata: "meshes/robot_t_shape.obj"
+inputdata: "meshes/robot_t_shape.obj" # 用于高精度 SVSDF 碰撞的机器人网格模型
 
-threads_num: 8
-occupancy_resolution: 0.10
+# ============================
+# 2. 核心计算资源与空间离散化 (直接影响时间与精度)
+# ============================
+threads_num: 8                # 【结算时间】多线程并行数量，越高处理并行段或评估时耗时越短。
+occupancy_resolution: 0.10    # 【结算精度/时间】地图栅格化分辨率。越小精度越高，但 ESDF 更新和搜索时间呈平方/立方级增长。
 debug_output: false
 sta_threshold: 1
-colli_thres: 0.05
-kernel_size: 7
-kernel_yaw_num: 18
-front_end_safeh: 0.05
+colli_thres: 0.05             # 碰撞安全阈值
 
+kernel_size: 7                # 【结算时间/精度】离散碰撞检测的核大小。变大增加耗时但覆盖更完整。
+kernel_yaw_num: 18            # 【结算时间/精度】朝向角 (Yaw) 离散化数量 (360/18=20度)。越大朝向判断越精细，但预计算与查询耗时直线上升。
+front_end_safeh: 0.05         # 前端拓扑搜索时的安全膨胀余量
+
+# ============================
+# 3. 动力学与物理模型参数
+# ============================
 vehicleMass: 0.61
 gravAcc: 9.8
 horizDrag: 0.10
 vertDrag: 0.10
 parasDrag: 0.01
 speedEps: 0.0001
-
-smoothingEps: 1.0e-2
-integralIntervs: 10
-relCostTol: 1.0e-8
-relCostTolMidEnd: 1.0e-8
-eps: 0.08
-
 vmax: 1.2
 omgmax: 2.5
 thetamax: 6.0
+
+# ============================
+# 4. 后端优化器通用容差与步长 (决定优化质量与收敛速度)
+# ============================
+smoothingEps: 1.0e-2          # 【结算时间/精度】平滑容差，决定优化退出条件。越小轨迹越平滑(精度高)，但迭代次数增多(耗时长)。
+integralIntervs: 10           # 【结算精度/时间】轨迹积分评估间隔数。越大对连续碰撞/动力学评估越精细，但求值计算量显著增加。
+relCostTol: 1.0e-8            # 【结算时间/精度】目标函数相对代价容差(优化收敛条件)。越小收敛越极致(耗时大)。
+relCostTolMidEnd: 1.0e-8      
+eps: 0.08
+inittime: 0.9
+mem_size: 16                  # 【结算时间】LMBM/L-BFGS 拟牛顿法保存的历史步数。一般在 8~32 间，影响收敛速度。
+past: 64                      # 过去代价历史长度，用于提前终止评估
+min_step: 1.0e-32
+g_epsilon: 0.0
+
+# 优化权重配置 (改变轨迹形态倾向，间接影响到达极值的路径)
 weight_v: 10.0
 weight_a: 20.0
-weight_p: 150.0
+weight_p: 150.0               # 位置偏离惩罚权重
 weight_pr: 8.0
 weight_ar: 0.0
 weight_omg: 6.0
@@ -45,47 +64,45 @@ weight_theta: 6.0
 rho_mid_end: 1.0
 rho: 2.0
 safety_hor: 0.08
-inittime: 0.9
-mem_size: 16
-past: 64
-min_step: 1.0e-32
-g_epsilon: 0.0
 
+# ============================
+# 5. 各阶段特定算法参数
+# ============================
 topology:
-  num_samples: 15000
-  knn: 10
-  max_paths: 2
+  num_samples: 15000          # 【结算时间/精度】PRM前端拓扑采样点数。点数越多，在复杂迷宫中找到解(且是最优解)概率越高，但建图极慢。
+  knn: 10                     # 拓扑图连接邻居数。越大路径越平滑，建图耗时越长。
+  max_paths: 2                # 探索候选路径的数量上限。
 
 se2:
-  discretization_step: 0.15
-  max_push_attempts: 5
+  discretization_step: 0.15   # 【结算精度/时间】将拓扑路径切分为SE(2)状态的步长。越小则分段越密集，后端优化自由度越高(越贴合)，但优化变量猛增导致大幅降速。
+  max_push_attempts: 5        # 推离障碍物最大尝试次数。
 
 optimizer:
-  max_iterations: 100
-  lambda_smooth: 1.0
-  lambda_time: 1.0
-  lambda_safety: 10.0
-  lambda_dynamics: 1.0
-  lambda_pos_residual: 5.0
+  max_iterations: 100         # 【结算时间】优化器最大迭代次数。硬性卡住最大结算时间，防止陷入死循环。
+  lambda_smooth: 1.0          # 平滑惩罚
+  lambda_time: 1.0            # 时间代价惩罚
+  lambda_safety: 10.0         # 避障惩罚 (越高越安全，但容易引起剧烈转向)
+  lambda_dynamics: 1.0        
+  lambda_pos_residual: 5.0    
   lambda_yaw_residual: 2.0
-  max_vel: 1.0
+  max_vel: 1.5
   max_acc: 2.0
-  max_yaw_rate: 1.5
+  max_yaw_rate: 1.0
   safety_margin: 0.05
-  step_size: 0.01
+  step_size: 0.01             # 【结算时间】优化梯度步长
 
-hybrid_astar:
-  step_size: 0.01
+hybrid_astar:                 # (作为Fallback回退时触发，极其耗时)
+  step_size: 0.01             # 【结算时间】搜索步长，越小搜索树规模呈指数级爆炸。
   wheel_base: 0.5
   max_steer: 0.6
-  steer_samples: 5
+  steer_samples: 5            # 【结算时间/精度】单步展开的方向盘采样数(分支因子)。越大转向越自然，但搜时间极速增加。
   goal_tolerance_pos: 0.35
   goal_tolerance_yaw: 0.4
   reverse_penalty: 2.0
   steer_penalty: 0.2
   steer_change_penalty: 0.2
   switch_penalty: 2.0
-  max_expansions: 50000
+  max_expansions: 50000       # 【结算时间】全量搜索最大展开节点数。直接限制极端情况下的卡死时间。
   fast_pass_max_expansions: 8000
   fast_pass_steer_samples: 3
   pose_recovery_max_radius: 0.6
@@ -96,7 +113,6 @@ start_pose:
   x: 3.16
   y: 45.92
   yaw: -1.98
-
 goal_pose:
   x: 5.01
   y: 11.73

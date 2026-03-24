@@ -38,9 +38,6 @@ private:
   };
 
   std::vector<Eigen::Vector2d> vertices_;
-
-  NearestEdgeResult nearestEdge(const Eigen::Vector2d& point) const;
-  Eigen::Vector2d outwardNormal(size_t edge_index) const;
 };
 
 }  // namespace isweep_planner

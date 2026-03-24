@@ -21,12 +21,6 @@ public:
   // Circumscribed circle radius
   double circumscribedRadius() const { return circumscribed_radius_; }
 
-  // Compute signed distance from a point (in body frame) to the polygon boundary
-  // Positive = outside, Negative = inside
-  double bodyFrameSdf(const Eigen::Vector2d& point) const;
-
-  // Query signed distance, closest point, and gradient in the body frame.
-  BodyFrameQuery bodyFrameQuery(const Eigen::Vector2d& point) const;
   const BodyFrameSdf& bodyFrameSdfModel() const { return body_frame_sdf_; }
 
   // Get polygon vertices

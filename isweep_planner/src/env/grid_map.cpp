@@ -145,33 +145,6 @@ double GridMap::getEsdfCell(int gx, int gy) const {
   return esdf_[linearIndex(gx, gy)];
 }
 
-void GridMap::inflateByRadius(double radius) {
-  int r_cells = static_cast<int>(std::ceil(radius / resolution_));
-  inflated_ = occupancy_;
-
-  for (int y = 0; y < height_; ++y) {
-    for (int x = 0; x < width_; ++x) {
-      int8_t val = occupancy_[y * width_ + x];
-      if (isOccupiedValue(val)) {
-        // Mark all cells within radius as occupied
-        for (int dy = -r_cells; dy <= r_cells; ++dy) {
-          for (int dx = -r_cells; dx <= r_cells; ++dx) {
-            if (dx * dx + dy * dy <= r_cells * r_cells) {
-              int nx = x + dx, ny = y + dy;
-              if (isInside(nx, ny)) {
-                inflated_[ny * width_ + nx] = 100;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  computeEsdf();
-  geometry_map_.rebuild(width_, height_, resolution_, origin_x_, origin_y_, inflated_);
-}
-
 void GridMap::computeEsdf() {
   const int n = width_ * height_;
   esdf_.assign(n, kInf);

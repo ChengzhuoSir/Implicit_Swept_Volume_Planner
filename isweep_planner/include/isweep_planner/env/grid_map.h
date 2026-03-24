@@ -28,8 +28,6 @@ public:
   int linearIndex(int gx, int gy) const { return gy * width_ + gx; }
 
   // Inflate occupancy grid by given radius (in meters)
-  void inflateByRadius(double radius);
-
   // Compute Euclidean Signed Distance Field
   void computeEsdf();
 

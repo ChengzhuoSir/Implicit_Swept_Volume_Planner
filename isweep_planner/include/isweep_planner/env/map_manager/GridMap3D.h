@@ -26,9 +26,6 @@ class GridMap3D
         bool isIndexOccupied(const Vector3i& index);
 
 
-        bool isIndexOccupiedFlate(const Vector3i& index, const int flate_pix);
-
-
         Vector3i getGridIndex(const Vector3d& pos_w);
 
 
