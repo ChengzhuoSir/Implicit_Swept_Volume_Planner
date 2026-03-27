@@ -1,119 +1,125 @@
-# iSweep Planner (Implicit Swept-Volume Planner)
-
-<div align="center">
+# iSweep Planner
 
 [![ROS](https://img.shields.io/badge/ROS-Noetic-green.svg)](http://wiki.ros.org/noetic)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![C++](https://img.shields.io/badge/C++-14-blue.svg)](https://isocpp.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**A High-Performance, Morphology-Aware Global Motion Planner for Arbitrarily-Shaped Robots**
+`iSweep Planner` 是一个面向任意形状地面机器人的 ROS 全局规划器。它使用 implicit swept-volume SDF（SVSDF）做连续碰撞约束，在狭窄通道、贴边转角和车体外形不能简单近似为圆的场景中，生成满足速度、加速度和角速度约束的 `SE(2)` 轨迹。
 
-</div>
+当前仓库提供 ROS Noetic 包、示例地图、RViz 配置，以及一套可直接修改的多边形 footprint 和网格模型配置。
 
-<br>
+## 适用场景
 
-**iSweep Planner** 是一款针对**任意多边形（Any-shape）地面机器人**设计的高效、高精度连续避障全局运动规划器。针对传统膨胀圆方法（如 A*, TEB）在复杂厂房、仓储和狭窄通道中易发生死锁或碰撞的问题，iSweep Planner 创造性地结合了 **粗到细的分层架构（Coarse-to-Fine Architecture）** 与 **隐式扫掠体积符号距离场（Implicit Swept-Volume SDF）**，能够在毫秒级内求解出严格满足动力学约束与精确几何边界的安全轨迹。
+- 机器人外形明显偏离圆形，膨胀圆近似过于保守。
+- 地图中存在窄通道、贴边转角或需要精确姿态调整的区域。
+- 需要连续碰撞检查，而不只是离散路径点避障。
+- 希望在优化失败时保留搜索式回退方案。
 
-本项目在底层思想与连续避障理论上参考并致敬了前沿的 [ESV (Efficient Swept-Volume) Planner](https://github.com/HKUST-Aerial-Robotics/esv_planner) 的学术工作，并在此基础上进行了深度的**工业级重构与工程增强**。
+## 方法概览
 
-## 🌟 核心特性 (Key Features)
+规划流程采用一个由粗到细的管线，而不是把所有约束一次性丢给单个优化器：
 
-* **精确的几何感知 (Morphology-Aware)**
-  告别保守的“外接圆膨胀”。算法直接读取机器人的真实多边形 Footprint，使用多边形隐式距离场进行碰撞惩罚，完美适应矩形车体、差速车、长轴距卡车等任意非凸形状。
-* **分段治之的 C2F 架构 (Coarse-to-Fine Pipeline)**
-  * **前端**：在 $R^2$ 空间构建降维拓扑图网络，快速跨越死胡同。
-  * **中端**：根据环境 ESDF 安全裕度进行轨迹风险分段（Risk-Level Segmentation）。
-  * **后端**：在开阔区域使用超轻量的轨迹优化；在极端狭窄的“高风险”地段，触发带有边界形变约束的 Strict SE(2) SVSDF 严格求解器。
-* **弹性张力防震荡机制 (Elastic Tension Recovery)**
-  针对传统梯度下降法在 U 型死角容易陷入局部极小值的问题，创新性地引入了基于前后节点“橡皮筋张力”与“动量”的逃逸策略，极大提升了极限通道的贯穿率。
-* **极佳的硬件部署亲和性 (Cross-Platform & Hardware Acceleration)**
-  工程经过纯净重构，高度解耦。内置智能 CMake 探针，**支持在 x86 平台启用 AVX/SSE 加速，在 ARM 架构（如 NVIDIA Jetson, 树莓派）上自动启用 NEON 硬件加速**，同时规避了棘手的 Eigen 内存对齐崩溃问题。
+1. 在 `R^2` 平面先做拓扑搜索，生成候选路径。
+2. 将候选路径补全为 `SE(2)` 位姿序列，并按风险分段。
+3. 在后端同时优化位置、航向和时间分配，并加入连续 SVSDF 碰撞惩罚。
+4. 遇到极端狭窄或非光滑接触情况时，使用 LMBM 和回退搜索提高可解性。
 
----
+如果你更关心实现位置，核心代码主要在这些目录：
 
-## 📂 领域驱动架构 (Architecture)
+- `isweep_planner/src/global_search`：前端拓扑搜索、Hybrid A*、Swept A*
+- `isweep_planner/src/optimization`：SE(2) 序列生成、后端优化、连续安全评估
+- `isweep_planner/src/env`：地图、footprint、隐式 SDF、扫掠体积相关计算
+- `isweep_planner/src/framework`：运行时调度和恢复逻辑
+- `isweep_planner/src/ros_interface`：ROS 节点、话题桥接和可视化
 
-通过对底层算法解耦，我们构建了高内聚的工业级 C++ 库：
+## 仓库结构
 
 ```text
-src/isweep_planner/
-├── include/isweep_planner/ & src/
-│   ├── core/           # 核心数学、轨迹插值与 ESDF 梯度分析工具
-│   ├── env/            # 物理环境建模，包含地图、网格外形与 SVSDF 计算
-│   ├── global_search/  # 拓扑搜索与前端降维探路算法 (Hybrid A*, Swept A*)
-│   ├── optimization/   # 轨迹序列化、风险切分与高/低风险数值后端
-│   ├── framework/      # 运行主轴与多层级异常恢复降级管理器 (Recovery Manager)
-│   ├── ros_interface/  # 严格隔离的 ROS 通信网关与 Rviz Marker 发布层
-│   └── third_party/    # 外部高阶依赖 (libigl, nanoflann, lmbm)
+.
+├── README.md
+└── isweep_planner/
+    ├── config/      # 规划参数和 RViz 配置
+    ├── launch/      # demo.launch / planner.launch
+    ├── maps/        # 示例栅格地图
+    ├── meshes/      # 机器人网格模型
+    ├── include/     # 头文件
+    ├── src/         # 核心实现
+    └── lib/         # 预编译依赖库（如 lmbm.so）
 ```
 
----
+## 依赖与构建
 
-## 🚀 快速上手 (Quick Start)
+推荐环境：`Ubuntu 20.04 + ROS Noetic`
 
-### 1. 环境依赖
-* **OS:** Ubuntu 20.04
-* **ROS:** Noetic
-* **库:** Eigen3, PCL, OpenMP
+安装常用依赖：
 
 ```bash
-# 安装基础 ROS 与数学依赖
 sudo apt-get update
-sudo apt-get install ros-noetic-geometry-msgs ros-noetic-nav-msgs ros-noetic-tf2-ros ros-noetic-visualization-msgs libpcl-dev
+sudo apt-get install \
+  libeigen3-dev \
+  libpcl-dev \
+  ros-noetic-geometry-msgs \
+  ros-noetic-map-server \
+  ros-noetic-nav-msgs \
+  ros-noetic-pcl-conversions \
+  ros-noetic-roscpp \
+  ros-noetic-sensor-msgs \
+  ros-noetic-tf2 \
+  ros-noetic-tf2-ros \
+  ros-noetic-visualization-msgs
 ```
 
-### 2. 编译工程
-
-请务必使用 `Release` 模式编译，以释放 C++ 底层的矩阵加速性能：
+在 catkin 工作空间中编译：
 
 ```bash
-mkdir -p ~/isweep_ws/src
-cd ~/isweep_ws/src
-git clone <your_repo_url> isweep_planner
-cd ..
-
-# 开启极速编译
+cd <catkin_ws>
 catkin_make -DCMAKE_BUILD_TYPE=Release
 source devel/setup.bash
 ```
 
-### 3. 运行与可视化
+`CMakeLists.txt` 已经为 `x86_64` 和 `ARM64` 增加了只作用于本项目源码的编译优化选项，第三方静态库不会被一并改写。
 
-启动内置的 Demo 场景与 RViz 监控节点：
+## 快速开始
+
+如果你想直接跑仓库自带示例，可以启动 demo：
 
 ```bash
-roslaunch isweep_planner demo.launch
+roslaunch isweep_planner demo.launch use_map_server:=true
 ```
 
-在 RViz 中，通过 `2D Nav Goal` 指定终点，您将看到：
-* 🔴 **红色曲线**：后端生成的平滑且动力学可行的行驶轨迹。
-* 🟢 **绿色多边形序列**：基于机器人真实外廓在 SE(2) 状态下生成的扫掠体积（Swept-Volume）动态展示。
+这会：
 
----
+- 启动 `isweep_planner`
+- 加载仓库自带地图
+- 打开 RViz 并载入 `isweep_planner/config/demo.rviz`
 
-## 🛠 配置指南 (Configuration)
+启动后可以在 RViz 中使用 `2D Nav Goal` 指定目标点。
 
-您可以通过修改 `config/planner.yaml` 灵活定制您的底盘约束：
+默认地图由 `demo.launch` 中的 `map_file` 指定。其他示例地图位于 `isweep_planner/maps/`。
 
-```yaml
-# 机器人的几何多边形外廓 (基于后轴或几何中心的相对坐标)
-footprint: [0.20, 0.25, 0.20, -0.25, -0.10, -0.25, -0.10, 0.25]
+如果不启用 `use_map_server`，节点会等待外部地图输入；这和 `isweep_planner/config/planner.yaml` 中的 `startup_wait_for_map` 配置一致。
 
-# 后端优化的运动学极限
-optimizer:
-  max_vel: 1.2      # 最大线速度 (m/s)
-  max_acc: 2.0      # 最大加速度 (m/s^2)
-  max_yaw_rate: 2.5 # 最大角速度 (rad/s)
-  
-# 兜底前端 (Hybrid A*) 的阿克曼运动学约束
-hybrid_astar:
-  wheel_base: 0.5   # 轴距，决定了车辆的最小转弯半径
-  max_steer: 0.6    # 最大前轮转向角 (rad)
-```
+## 配置入口
 
-## 📜 许可证 (License)
+主要参数位于 `isweep_planner/config/planner.yaml`。通常优先关注下面几组：
 
-本项目采用 [MIT License](LICENSE)。
+- `footprint`：二维多边形外形，影响搜索和优化阶段的几何约束。
+- `inputdata`：机器人网格模型，用于更高精度的 SVSDF 评估。
+- `topology.*`：前端采样和候选路径数量。
+- `se2.*`：位姿序列离散步长和障碍推离次数。
+- `optimizer.*`：迭代次数、安全距离、运动学约束和代价权重。
+- `hybrid_astar.*`：优化失败时的回退搜索参数。
 
-## 🙏 致谢 (Acknowledgements)
-The core implicit swept-volume formulation and initial pipeline logic are inspired by the outstanding work of [HKUST-Aerial-Robotics/esv_planner](https://github.com/HKUST-Aerial-Robotics/esv_planner). We sincerely thank the authors for their contributions to the community.
+如果你准备替换机器人模型，通常至少需要同时检查 `footprint`、`inputdata`、`optimizer.max_vel`、`optimizer.max_acc`、`optimizer.max_yaw_rate` 和 `hybrid_astar.wheel_base`。
+
+## 说明
+
+这个仓库更像一个可运行、可继续改造的规划器实现，而不是论文配套代码的直接镜像。README 只保留使用和结构信息；更细的算法推导、梯度细节和优化器说明，建议单独维护到技术文档中。
+
+## License
+
+项目在 `package.xml` 中声明为 `MIT`。当前仓库没有单独的 `LICENSE` 文件，如需对外发布，建议补上正式文本。
+
+## Acknowledgements
+
+项目中的 implicit swept-volume 思路和部分总体方向参考了 [HKUST-Aerial-Robotics/esv_planner](https://github.com/HKUST-Aerial-Robotics/esv_planner)。当前实现针对地面机器人场景做了重新组织和适配。

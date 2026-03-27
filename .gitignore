@@ -18,7 +18,3 @@ Thumbs.db
 # ROS
 *.pyc
 __pycache__/
-
-# Claude
-.claude/
-.worktrees/
