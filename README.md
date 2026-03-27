@@ -114,7 +114,42 @@ roslaunch isweep_planner demo.launch use_map_server:=true
 
 ## 说明
 
-这个仓库更像一个可运行、可继续改造的规划器实现，而不是论文配套代码的直接镜像。README 只保留使用和结构信息；更细的算法推导、梯度细节和优化器说明，建议单独维护到技术文档中。
+```mermaid
+graph TB
+    subgraph "感知与环境 (Perception & Env)"
+        Grid[Occupancy Grid] --> ESDF[ESDF Generator]
+        ESDF --> CC[Collision Checker]
+        Mesh[Robot Mesh/OBJ] --> SVM[Swept Volume Manager]
+    end
+
+    subgraph "前端全局搜索 (Front-end Search)"
+        ESDF & CC --> TP[Topology Planner]
+        TP -- "Halton Sampling" --> PRM[Roadmap Construction]
+        PRM -- "Dijkstra" --> RawPaths[Multiple Path Candidates]
+        RawPaths -- "Shortcut" --> RefinedPaths[Shortened R2 Paths]
+    end
+
+    subgraph "中端处理 (Mid-end Logic)"
+        RefinedPaths --> SG[SE2 Sequence Generator]
+        SG -- "Risk Evaluation" --> RiskSegments[Low/High Risk Segments]
+        RiskSegments -- "ESDF Push" --> OptimizedNodes[Optimized SE2 Waypoints]
+    end
+
+    subgraph "后端优化 (Back-end Optimization)"
+        OptimizedNodes -- "Control Points" --> MINCO[MINCO Trajectory Initialization]
+        MINCO -- "LMBM Solver" --> Optimizer[Joint Spatio-Temporal Optimizer]
+        SVM -- "SVSDF Gradient" --> Optimizer
+        Optimizer -- "Convergence" --> FinalTraj[Continuous SE2 Trajectory]
+    end
+
+    subgraph "安全评估与恢复 (Safety & Recovery)"
+        FinalTraj --> Evaluator[SVSDF Continuous Checker]
+        Evaluator -- "Fail" --> HA[Hybrid A* / Swept A*]
+        HA --> FinalTraj
+    end
+```
+
+---
 
 ## License
 
